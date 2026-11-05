@@ -28,6 +28,7 @@ EXCLUDED_NAMES = (
     ".cache",
     "__pycache__",
     "CMakeUserPresets.json",
+    "vcpkg_installed",
     ".env",
 )
 _GIT_IDENTITY = ["-c", "user.name=DepBot", "-c", "user.email=depbot@localhost", "-c", "commit.gpgsign=false"]
@@ -132,7 +133,7 @@ def prepare_working_copy(
     # Build outputs created later must never show up as DepBot edits.
     (dest / ".git" / "info").mkdir(parents=True, exist_ok=True)
     (dest / ".git" / "info" / "exclude").write_text(
-        "\n".join(["build/", "cmake-build-*/", "CMakeUserPresets.json", ".cache/", ""]),
+        "\n".join(["build/", "cmake-build-*/", "CMakeUserPresets.json", ".cache/", "vcpkg_installed/", ""]),
         encoding="utf-8",
     )
     if mode == "snapshot":

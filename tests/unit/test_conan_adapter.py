@@ -69,14 +69,17 @@ def test_version_ranges_and_bad_targets_refused(tmp_path):
         ConanAdapter().update_dependency(tmp_path, "toydep", "2.0.0; rm -rf /")
 
 
-def test_detector_refuses_conanfile_py_and_vcpkg(tmp_path):
+def test_detector_refuses_conanfile_py_and_mixed_managers(tmp_path):
     (tmp_path / "conanfile.py").write_text("print('x')")
     with pytest.raises(UnsupportedManifest, match="executable"):
         detect_adapter(tmp_path)
     (tmp_path / "conanfile.py").unlink()
+    (tmp_path / "conanfile.txt").write_text("[requires]\ntoydep/1.0.0\n")
     (tmp_path / "vcpkg.json").write_text("{}")
-    with pytest.raises(UnsupportedManifest, match="vcpkg"):
+    with pytest.raises(UnsupportedManifest, match="multiple package managers"):
         detect_adapter(tmp_path)
+    with pytest.raises(UnsupportedManifest, match="no supported"):
+        detect_adapter(tmp_path / "missing")
 
 
 def test_install_args_are_argv_lists(repo):

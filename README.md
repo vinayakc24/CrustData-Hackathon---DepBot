@@ -11,7 +11,8 @@ install/configure/build/test, and reports per repository plus one fleet summary.
 
 ## Requirements
 
-Python 3.11+, CMake ≥ 3.15, a C++17 compiler, Conan 2, Git, and ripgrep.
+Python 3.11+, CMake ≥ 3.15, a C++17 compiler, Git, ripgrep, and a package manager:
+Conan 2 (`conanfile.txt`) or vcpkg in manifest mode (`vcpkg.json`, with `VCPKG_ROOT` set).
 `gh` is needed only for `--create-pr`.
 
 ```bash
@@ -94,6 +95,8 @@ writes a clearly labelled local PR artifact instead.
   timeout. Builds get an allow-listed environment with no tokens or API keys.
 - Patches can touch only files named in the migration plan. The dependency
   manifest is changed only through the package-manager adapter.
+- vcpkg: only the target's `version>=`/override changes; `builtin-baseline` is never moved, and
+  dependencies pinned only by the baseline are refused with an explanation.
 - A repository is reported `verified` only if the upgraded install, configure,
   build and tests actually ran and passed.
 - Repair attempts are bounded by policy, and an identical patch is never re-applied.
@@ -102,7 +105,7 @@ writes a clearly labelled local PR artifact instead.
 
 | Area | Owner | State |
 |---|---|---|
-| Contracts, CLI, registry, selection, policy, Conan adapter, working copies, engine, fleet runner, PR delivery | A | implemented and unit-tested |
+| Contracts, CLI, registry, selection, policy, Conan + vcpkg adapters, working copies, engine, fleet runner, PR delivery | A | implemented and unit-tested |
 | Release research, code impact analysis | B | in progress |
 | Fixtures, migration planning/patching, verification, repair, per-repo reports | C | in progress |
 

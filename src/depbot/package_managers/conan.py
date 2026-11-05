@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 from pathlib import Path
 
 from depbot.models import ManifestChange, PackageManagerName
@@ -122,3 +123,6 @@ class ConanAdapter(PackageManagerAdapter):
     def command_env(self) -> dict[str, str]:
         home = os.environ.get(CONAN_HOME_ENV)
         return {"CONAN_HOME": str(Path(home).resolve())} if home else {}
+
+    def environment_problems(self) -> list[str]:
+        return [] if shutil.which("conan") else ["conan executable not found on PATH"]
