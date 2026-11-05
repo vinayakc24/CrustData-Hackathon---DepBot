@@ -233,8 +233,8 @@ class RepositoryJobRunner:
         skipped_reason: str | None = None
         try:
             self._inspect()
+            self._probe()  # first: R1 (header API diff) needs the new version's compile database
             self._research()
-            self._probe()
             self._impact()
             self._plan()
             self._patch()
@@ -339,8 +339,8 @@ class RepositoryJobRunner:
         }
 
     def _probe(self) -> None:
-        """Impact layer I3: build a scratch copy against the target version *before*
-        planning, so compiler diagnostics can prove where the upgrade breaks the code.
+        """Build a scratch copy against the target version before research and planning.
+        Its compile database feeds R1 (header API diff) and its diagnostics feed impact layer I3.
         Advisory only: it never changes the job status and never touches the worktree."""
         assert self.adapter is not None
         facts: dict[str, object] = {"ran": False}
@@ -372,11 +372,17 @@ class RepositoryJobRunner:
             diagnostics_path,
             json.dumps([d.model_dump(mode="json") for d in result.diagnostics], indent=2),
         )
+        probe_db = find_compile_commands(probe_wt)
+        saved_db = None
+        if probe_db is not None:
+            saved_db = probe_dir / "compile_commands.json"
+            shutil.copyfile(probe_db, saved_db)
         facts.update(
             ran=True,
             build_succeeded=bool(result.build and result.build.succeeded),
             errors=sum(d.severity in ("error", "fatal error") for d in result.diagnostics),
             diagnostics_path=str(diagnostics_path),
+            compile_commands=str(saved_db) if saved_db else None,
             worktree=str(probe_wt),
         )
 

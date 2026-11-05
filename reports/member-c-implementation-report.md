@@ -4,7 +4,7 @@
 - **Original implementation branch:** `member-c/migration-verification-reporting`
 - **Original development base:** `a49eab83e13752a86aabb2fdf7fa6a927cfbc40f`
 - **Follow-up branch:** `member-c/conan-e2e-reporting`
-- **Follow-up base (current fork/upstream main):** `1b1a1deb7da003420bd888c8921e3949a43fc00c`
+- **Follow-up base (current fork/upstream main):** `29eef91b76d9325370539987c9f4c43f1d99888d`
 - **Date:** 2026-11-06
 
 ## Changes delivered
@@ -55,7 +55,7 @@
 
 **This report:** `reports/member-c-implementation-report.md`.
 
-The original Member C implementation added migration, verification, reporting, fixture, and test files. Its initial six-commit sync was completed before this follow-up; before publishing, the follow-up branch and fork main were first fast-forwarded by ten commits and then synced with seven additional upstream commits to the current main SHA listed above.
+The original Member C implementation added migration, verification, reporting, fixture, and test files. Its initial six-commit sync was completed before this follow-up; before publishing, the follow-up branch and fork main were first fast-forwarded by ten commits and then synced with seven more commits before two additional upstream commits landed during validation to the current main SHA listed above.
 
 ## Verification results
 
@@ -97,6 +97,8 @@ The latest focused rerun after the vcpkg configure-argument fix used `-rs`: 17 p
 - **C4 — evidence report:** upgrade-report.md now includes the recorded pull-request publication state/note, policy decisions, repair-attempt source and artifact patch paths, and baseline/upgraded test counts. Missing facts remain labeled as not recorded.
 
 ### Follow-up validation
+
+After syncing to current upstream main (`29eef91b76d9325370539987c9f4c43f1d99888d`), the focused checks below were rerun against the refreshed source snapshot at 1b1a1de. Two more upstream commits later changed orchestrator.py and models.py; those changes are now included in the PR, but have not yet been rerun through tests. The Conan/CMake-dependent commands remain skipped because those executables are not installed.
 
 | Check | Result |
 |---|---|

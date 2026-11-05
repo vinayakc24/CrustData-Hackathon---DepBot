@@ -2,10 +2,10 @@
 
 - **Repository:** hgoel3105/CrustData-Hackathon---DepBot (fork of vinayakc24/CrustData-Hackathon---DepBot)
 - **Branch:** member-c/conan-e2e-reporting
-- **Base:** 1b1a1deb7da003420bd888c8921e3949a43fc00c
+- **Base:** 29eef91b76d9325370539987c9f4c43f1d99888d
 - **Scope:** recommendations C1–C4
 - **Pull request:** https://github.com/vinayakc24/CrustData-Hackathon---DepBot/pull/14
-- **Sync:** fork main was fast-forwarded by 10 upstream commits, then another 7 landed during PR creation; the branch is synced to the current base
+- **Sync:** fork main was fast-forwarded by 10 upstream commits, then another 7 landed during PR creation and 2 more during validation; the branch is synced to the current base
 
 ## Implemented
 
@@ -23,6 +23,8 @@ upgrade-report.md includes the recorded GitHub PR publication state and note, po
 
 ## Validation
 
+These focused checks were rerun against the local validation snapshot synced to upstream `1b1a1de`. Two upstream commits then changed orchestrator.py and models.py; those changes are included in this PR but were not rerun through tests. The PR branch is synced to current main `29eef91b76d9325370539987c9f4c43f1d99888d`.
+
 - tests/unit/test_verification_reporting_knowledge.py: **12 passed**.
 - Focused orchestrator scenarios covering happy path, baseline failure, upgraded test failure, successful repair, and repair give-up: **5 passed**.
 - tests/unit/test_demo_setup.py and tests/e2e/test_toydep_fleet.py: **3 passed, 2 skipped**.
@@ -39,7 +41,7 @@ Copy and paste this prompt into the next agent's chat:
 You are continuing work on DepBot in hgoel3105/CrustData-Hackathon---DepBot, a fork of vinayakc24/CrustData-Hackathon---DepBot. The project handles dependency release events across a configured fleet: it researches breaking changes, finds usages, plans and applies scoped migrations in isolated worktrees, verifies builds/tests with package-manager adapters, records state, and creates evidence/PR artifacts. This work is Member C's migration, verification, fixtures, and reporting area.
 
 Current follow-up branch: member-c/conan-e2e-reporting
-It is based on current main SHA 1b1a1deb7da003420bd888c8921e3949a43fc00c. PR #14 is the C1–C4 follow-up; PR #5 from the earlier implementation was merged. Do not merge this PR unless the repository owner explicitly asks.
+It is based on current main SHA 29eef91b76d9325370539987c9f4c43f1d99888d. PR #14 is the C1–C4 follow-up; PR #5 from the earlier implementation was merged. Do not merge this PR unless the repository owner explicitly asks.
 
 Implemented in this branch:
 - C1: Conan 2 header-only toydep recipes for v1/v2; repo_a/b/c use CMakeDeps, CMakeToolchain, cmake_layout, find_package(toydep), and toydep::toydep. Demo setup test checks both local creates.
