@@ -375,8 +375,9 @@ def research_release(
         confirmed = {c.id: c for c in confirm_replacements(removals, llm_changes, api)}
         changes = [confirmed.get(c.id, c) for c in changes]
     known = {s for c in changes if c.change_type != ChangeType.UNKNOWN for s in c.affected_symbols}
-    explained = {c.evidence_excerpt for c in llm_changes if c.change_type != ChangeType.UNKNOWN}
-    changes = [c for c in changes if not (c in pending_unknowns and c.evidence_excerpt in explained)]
+    # An unclassified paragraph is explained when a concrete LLM finding quotes (part of) it.
+    explained = [c.evidence_excerpt for c in llm_changes if c.change_type != ChangeType.UNKNOWN and c.evidence_excerpt]
+    changes = [c for c in changes if not (c in pending_unknowns and any(e in c.evidence_excerpt for e in explained))]
     added = [c for c in llm_changes if not set(c.affected_symbols) & known or c.change_type == ChangeType.BEHAVIOR]
     return changes + added
 
