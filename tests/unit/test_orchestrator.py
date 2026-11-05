@@ -292,3 +292,13 @@ def test_repair_giving_up_keeps_failure(job, tmp_path):
     state, _ = run_repository_job(job, _stages(verify=verify, repair=lambda **kw: []), artifacts_root=tmp_path / "a")
     assert state.status == JobStatus.FAILED_BUILD and "no repair proposed" in state.status_reason
     assert state.repair_attempts == 0
+
+
+@pytest.mark.real_tooling
+def test_missing_conan_blocks_job_before_any_edit(job, tmp_path, monkeypatch):
+    import depbot.package_managers.conan as conan_mod
+    monkeypatch.setattr(conan_mod.shutil, "which", lambda name: None)
+    state, outcome = run_repository_job(job, _stages(), artifacts_root=tmp_path / "a")
+    assert outcome.status == OutcomeStatus.BLOCKED
+    assert "conan tooling: conan executable not found on PATH" in state.status_reason
+    assert state.manifest_change is None and state.baseline is None
