@@ -85,9 +85,22 @@ def propose_repair(
         return []
     if classify_failure(failure) != "removed_symbol":
         return []
+    known = {patch.unified_diff for patch in state.patches}
     usages = missed_usages(worktree, state, failure)
     if not usages:
-        return []
+        # No compiler-located miss: only re-propose planned edits that were never applied
+        # (e.g. diagnostics unavailable). Same evidence and validation; never a repeat diff.
+        evidence = {s.lower() for c in state.breaking_changes for s in c.affected_symbols}
+        output = "\n".join(t for r in (failure.configure, failure.build, failure.tests) if r is not None
+                           for t in (r.stderr_tail, r.stdout_tail)).lower()
+        if not any(s and s in output for s in evidence):
+            return []
+        try:
+            planned = generate_patches(worktree=worktree, plan=state.migration_plan,
+                                       changes=state.breaking_changes, usages=state.usages)
+        except StageError:
+            return []
+        return [p for p in planned if p.unified_diff not in known]
     plan = []
     for file_path in sorted({u.file_path for u in usages}):
         mine = [u for u in usages if u.file_path == file_path]
@@ -105,6 +118,5 @@ def propose_repair(
         candidates = generate_patches(worktree=worktree, plan=plan, changes=state.breaking_changes, usages=usages)
     except StageError:
         return []  # stale or ambiguous evidence is a stop condition, not a repair
-    known = {patch.unified_diff for patch in state.patches}
     return [p.model_copy(update={"patch_id": f"repair{attempt}-{p.patch_id}"})
             for p in candidates if p.unified_diff not in known]
