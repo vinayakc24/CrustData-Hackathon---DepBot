@@ -30,6 +30,7 @@ from depbot.models import (
     UpgradePolicy,
 )
 from depbot.llm.base import LLMError
+from depbot.llm.gemini import GeminiLLMClient
 from depbot.llm.provider import AnthropicLLMClient
 from depbot.llm.runtime import LLMFactory, fixture_factory
 from depbot.orchestrator import load_default_stages, run_repository_job
@@ -171,7 +172,7 @@ def cmd_fleet_plan(args: argparse.Namespace) -> int:
     return 0
 
 
-LLM_MODES = ("none", "fixture", "anthropic")
+LLM_MODES = ("none", "fixture", "anthropic", "gemini")
 
 
 def _llm_factory(args: argparse.Namespace) -> LLMFactory | None:
@@ -185,6 +186,9 @@ def _llm_factory(args: argparse.Namespace) -> LLMFactory | None:
         if not args.llm_fixtures:
             raise LLMError("--llm fixture requires --llm-fixtures PATH")
         return fixture_factory(Path(args.llm_fixtures))
+    if mode == "gemini":
+        GeminiLLMClient.from_env(model=args.llm_model)  # fail fast if no key
+        return lambda: GeminiLLMClient.from_env(model=args.llm_model)
     AnthropicLLMClient.from_env(model=args.llm_model)  # fail fast if no key
     return lambda: AnthropicLLMClient.from_env(model=args.llm_model)
 
@@ -193,7 +197,7 @@ def _add_llm_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--llm", choices=LLM_MODES,
                         help="LLM provider for bounded stages (default: $DEPBOT_LLM or none)")
     parser.add_argument("--llm-fixtures", help="JSON {task: response} file for --llm fixture")
-    parser.add_argument("--llm-model", help="model for --llm anthropic (default: $DEPBOT_LLM_MODEL)")
+    parser.add_argument("--llm-model", help="model for --llm anthropic or gemini (default: $DEPBOT_LLM_MODEL)")
 
 
 def cmd_run(args: argparse.Namespace) -> int:

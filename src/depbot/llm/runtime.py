@@ -45,7 +45,7 @@ def get_llm_client() -> LLMClient:
     client = _current.get()
     if client is None:
         raise LLMNotConfigured(
-            "no LLM client is configured for this run (use --llm fixture|anthropic, "
+            "no LLM client is configured for this run (use --llm fixture|anthropic|gemini, "
             "or bind one with depbot.llm.runtime.use_llm_client)"
         )
     return client
