@@ -111,7 +111,8 @@ def build_watches(fleet: Fleet, *, state_dir: Path) -> tuple[list[ReleaseWatch],
         if w.dependency_name not in lowest:
             notes.append(f"watch {w.dependency_name}: no enabled repository declares it; not polled")
             continue
-        watches.append(ReleaseWatch(w.dependency_name, w.upstream_repo.strip().strip("/"), lowest[w.dependency_name]))
+        watches.append(ReleaseWatch(w.dependency_name, w.upstream_repo.strip().strip("/"),
+                                    lowest[w.dependency_name], tag_prefix=w.tag_prefix))
     return watches, notes
 
 
