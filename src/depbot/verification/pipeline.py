@@ -15,6 +15,7 @@ from depbot.models import (
 )
 from depbot.interfaces import StageError
 from depbot.package_managers.base import PackageManagerAdapter, minimal_env
+from depbot.verification.diagnostics import diagnostics_for
 from depbot.verification.command_runner import run_command
 from depbot.verification.error_classifier import classify_failure
 
@@ -25,15 +26,26 @@ BUILD_TIMEOUT_SECONDS = 600
 TEST_TIMEOUT_SECONDS = 300
 
 
+def _preset_entries(worktree: Path):
+    """configurePresets from CMakePresets.json and CMakeUserPresets.json, following `include`
+    chains (Conan 2 writes CMakeUserPresets.json including build/<T>/generators/CMakePresets.json)."""
+    pending = [worktree / "CMakePresets.json", worktree / "CMakeUserPresets.json"]
+    seen: set[Path] = set()
+    while pending:
+        path = pending.pop(0).resolve()
+        if path in seen or not path.is_file() or worktree.resolve() not in path.parents:
+            continue
+        seen.add(path)
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        yield from data.get("configurePresets", [])
+        pending.extend(path.parent / inc for inc in data.get("include", []) if isinstance(inc, str))
+
+
 def _preset_build_dir(worktree: Path, preset: str) -> Path | None:
-    path = worktree / "CMakePresets.json"
-    if not path.is_file():
-        return None
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    for entry in data.get("configurePresets", []):
+    for entry in _preset_entries(worktree):
         if entry.get("name") != preset:
             continue
         value = entry.get("binaryDir")
@@ -228,8 +240,13 @@ def run_verification(
         and tests_failed == 0
         and (not policy.require_tests or (tests_passed is not None and tests_passed > 0))
     )
+    diagnostics = diagnostics_for(
+        [results["configure"], results["build"], results["tests"]],
+        worktree=worktree, build_dirs=[build_dir],
+    )
     verification = VerificationResult(
         phase=phase,
+        diagnostics=diagnostics,
         dependency_install=results["install"],
         configure=results["configure"],
         build=results["build"],
