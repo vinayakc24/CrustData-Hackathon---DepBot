@@ -109,11 +109,12 @@ def test_unavailable_libclang_is_reported(tmp_path, monkeypatch):
 
 def test_dependency_include_dirs_excludes_project_sources(tmp_path):
     wt = tmp_path / "wt"
+    conan_include = (tmp_path / "conan/p/toydep1/include").resolve()
     entry = CompileCommand(file=str(wt / "src/a.cpp"), directory=str(wt / "build"), arguments=[
-        "c++", f"-I{wt}/src", f"-I{wt}/include", "-isystem", "/conan/p/toydep1/include",
+        "c++", f"-I{wt}/src", f"-I{wt}/include", "-isystem", str(conan_include),
         f"-I{wt}/vcpkg_installed/x64-linux/include", f"-I{wt}/build/dependency/toydep/include", "-c", "a.cpp"])
     got = {str(p) for p in hd.dependency_include_dirs([entry], wt)}
-    assert got == {"/conan/p/toydep1/include", str((wt / "vcpkg_installed/x64-linux/include").resolve()),
+    assert got == {str(conan_include), str((wt / "vcpkg_installed/x64-linux/include").resolve()),
                    str((wt / "build/dependency/toydep/include").resolve())}
 
 

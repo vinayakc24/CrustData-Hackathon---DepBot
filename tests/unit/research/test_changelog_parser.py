@@ -6,6 +6,7 @@ from depbot.research.changelog_parser import (
     ChangelogParseError,
     ChangelogSection,
     find_version_section,
+    find_sections_in_range,
 )
 
 
@@ -62,3 +63,13 @@ def test_missing_empty_and_malformed_inputs() -> None:
 def test_duplicate_matching_sections_are_rejected() -> None:
     with pytest.raises(ChangelogParseError, match="duplicate"):
         find_version_section("## 2.0.0\na\n## v2.0.0\nb\n", "2.0.0")
+
+
+def test_lists_all_version_sections_in_source_order() -> None:
+    sections = find_sections_in_range(
+        "## 3.0.0\nnew\n## 2.0.0\nmid\n## 1.0.0\nold\n",
+        after_version=None,
+        through_version="3.0.0",
+    )
+    assert [section.version for section in sections] == ["3.0.0", "2.0.0", "1.0.0"]
+    assert [section.content for section in sections] == ["new\n", "mid\n", "old\n"]
