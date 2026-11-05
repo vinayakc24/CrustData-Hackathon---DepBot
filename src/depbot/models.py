@@ -52,6 +52,15 @@ class ChangeType(StrEnum):
     UNKNOWN = "unknown"
 
 
+class ChangeSource(StrEnum):
+    """Which research layer produced a BreakingChange (see CONTRACTS.md §10)."""
+
+    API_DIFF = "api_diff"  # R1: old vs new public headers (libclang)
+    CHANGELOG_RULE = "changelog_rule"  # R2: deterministic release-note patterns
+    LLM = "llm"  # R3: leftovers only, validated against the source text
+    MANUAL = "manual"
+
+
 class AnalysisMethod(StrEnum):
     """How a usage was found."""
 
@@ -246,6 +255,8 @@ class BreakingChange(_Model):
     evidence_urls: list[str]  # URL or file:// path of a retrieved source
     evidence_excerpt: str | None = None
     confidence: float = Field(ge=0.0, le=1.0)
+    source: ChangeSource | None = None  # provenance; None for legacy producers
+    affected_usrs: list[str] = Field(default_factory=list)  # exact declarations (R1); used by AST impact
 
     @model_validator(mode="after")
     def _evidence_required(self) -> BreakingChange:

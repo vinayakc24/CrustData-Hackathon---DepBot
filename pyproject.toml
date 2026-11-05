@@ -14,6 +14,8 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
+# Header API diff and AST impact analysis; needs the system libclang 18.
+ast = ["clang==18.1.8"]
 
 [project.scripts]
 depbot = "depbot.cli:main"
