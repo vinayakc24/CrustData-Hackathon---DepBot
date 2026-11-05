@@ -50,7 +50,7 @@ def test_matches_symbols_and_maps_shared_changes_conservatively(tmp_path: Path) 
     assert usages[0].related_change_ids == ["bc1"]
     assert usages[1].related_change_ids == ["bc1", "bc2"]
     assert all(u.analysis_method.value == "ripgrep" for u in usages)
-    assert all(u.impact == ImpactLevel.POSSIBLE and u.confidence == 0.5 for u in usages)
+    assert all(u.impact == ImpactLevel.DEFINITE and u.confidence == 0.95 for u in usages)
 
 
 def test_duplicate_matches_are_removed_and_output_order_is_stable(tmp_path: Path, monkeypatch) -> None:

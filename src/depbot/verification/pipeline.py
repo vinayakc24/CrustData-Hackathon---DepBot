@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 from pathlib import Path
 
 from depbot.models import (
@@ -13,7 +14,8 @@ from depbot.models import (
     VerificationResult,
 )
 from depbot.interfaces import StageError
-from depbot.package_managers.base import PackageManagerAdapter
+from depbot.package_managers.base import PackageManagerAdapter, minimal_env
+from depbot.verification.diagnostics import diagnostics_for
 from depbot.verification.command_runner import run_command
 from depbot.verification.error_classifier import classify_failure
 
@@ -24,15 +26,26 @@ BUILD_TIMEOUT_SECONDS = 600
 TEST_TIMEOUT_SECONDS = 300
 
 
+def _preset_entries(worktree: Path):
+    """configurePresets from CMakePresets.json and CMakeUserPresets.json, following `include`
+    chains (Conan 2 writes CMakeUserPresets.json including build/<T>/generators/CMakePresets.json)."""
+    pending = [worktree / "CMakePresets.json", worktree / "CMakeUserPresets.json"]
+    seen: set[Path] = set()
+    while pending:
+        path = pending.pop(0).resolve()
+        if path in seen or not path.is_file() or worktree.resolve() not in path.parents:
+            continue
+        seen.add(path)
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        yield from data.get("configurePresets", [])
+        pending.extend(path.parent / inc for inc in data.get("include", []) if isinstance(inc, str))
+
+
 def _preset_build_dir(worktree: Path, preset: str) -> Path | None:
-    path = worktree / "CMakePresets.json"
-    if not path.is_file():
-        return None
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    for entry in data.get("configurePresets", []):
+    for entry in _preset_entries(worktree):
         if entry.get("name") != preset:
             continue
         value = entry.get("binaryDir")
@@ -59,6 +72,27 @@ def _preset_build_dir(worktree: Path, preset: str) -> Path | None:
             )
         return directory
     return None
+
+
+def _reset_build_dir(worktree: Path) -> None:
+    """Recreate the isolated build tree so phases cannot reuse stale CMake caches."""
+    build_dir = worktree / "build"
+    if build_dir.is_symlink():
+        raise StageError("refusing to reset a symlinked build directory", blocked=True)
+    resolved = build_dir.resolve()
+    if resolved == worktree or worktree not in resolved.parents:
+        raise StageError(f"build directory escapes the isolated worktree: {resolved}", blocked=True)
+    try:
+        if build_dir.exists():
+            if build_dir.is_dir():
+                shutil.rmtree(build_dir)
+            else:
+                build_dir.unlink()
+        build_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise StageError(
+            f"could not recreate isolated build directory {build_dir}: {exc}", blocked=True
+        ) from exc
 
 
 def _run_step(
@@ -89,7 +123,12 @@ def _test_counts(result: CommandResult) -> tuple[int | None, int | None, list[st
         if failed:
             section = re.search(r"The following tests FAILED:\s*(.*?)(?:\n\s*\n|\Z)", output, re.DOTALL)
             if section:
-                names = [line.strip(" \t\r\n0123456789.:") for line in section.group(1).splitlines() if line.strip()]
+                for line in section.group(1).splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    named = re.match(r"\d+\s*[-:]\s*(.+?)(?:\s+\(Failed\))?$", line, re.IGNORECASE)
+                    names.append(named.group(1).strip() if named else line)
         return max(0, total - failed), failed, names
     passed_match = re.search(r"(\d+) tests? passed out of (\d+)", output, re.IGNORECASE)
     if passed_match:
@@ -119,9 +158,10 @@ def run_verification(
     zero discovered tests is reported as unpassed.
     """
     worktree = worktree.resolve()
+    _reset_build_dir(worktree)
     logs_dir = artifacts_dir / "commands" / phase.value
     logs_dir.mkdir(parents=True, exist_ok=True)
-    extra_env = adapter.command_env()
+    extra_env = minimal_env(adapter.command_env())
     results: dict[str, CommandResult | None] = {"install": None, "configure": None, "build": None, "tests": None}
 
     try:
@@ -200,8 +240,13 @@ def run_verification(
         and tests_failed == 0
         and (not policy.require_tests or (tests_passed is not None and tests_passed > 0))
     )
+    diagnostics = diagnostics_for(
+        [results["configure"], results["build"], results["tests"]],
+        worktree=worktree, build_dirs=[build_dir],
+    )
     verification = VerificationResult(
         phase=phase,
+        diagnostics=diagnostics,
         dependency_install=results["install"],
         configure=results["configure"],
         build=results["build"],

@@ -1,301 +1,236 @@
-"""Resolve textual candidates to compiler declarations with libclang USRs (I2)."""
+"""Impact layer I2: resolve textual candidates with libclang (no LLM).
+
+Each translation unit of the baseline compile database is parsed with the project's
+own flags. Every reference to a candidate symbol in a project file (``.cpp`` and
+headers) is resolved to the declaration it names (USR). A candidate line is then:
+
+* CONFIRMED  — references, re-declares or (via a macro body) expands to a changed
+  dependency declaration;
+* RULED_OUT  — refers to a different entity, or the match is in a comment/literal;
+* RESIDUAL   — no AST node in this configuration (inactive ``#if`` branch,
+  uninstantiated code); handed to the compiler probe / LLM / humans.
+
+Changed declarations are identified by ``BreakingChange.affected_usrs`` (from R1) when
+available, otherwise as declarations of that name inside the dependency's include
+directories. Files no translation unit covers are reported as not covered.
+"""
 
 from __future__ import annotations
 
 import logging
-from collections import defaultdict
-from pathlib import Path, PurePosixPath
+import re
+from dataclasses import dataclass, field
+from pathlib import Path
 
 from depbot.clang_support import ClangUnavailable, load_cindex, overloaded_decls
-from depbot.models import (
-    AnalysisMethod,
-    BreakingChange,
-    CodeUsage,
-    ImpactLevel,
-    ResolutionLayer,
-)
 from depbot.repository.compile_db import CompileCommand, load_compile_commands
+from depbot.research.header_diff import dependency_include_dirs
 
 log = logging.getLogger(__name__)
 
-
-def _absolute(path: str | Path) -> Path:
-    return Path(path).resolve(strict=False)
-
-
-def _normalize_flag_path(value: str, directory: Path) -> str:
-    path = Path(value)
-    return str(path if path.is_absolute() else (directory / path).resolve(strict=False))
+MAX_TRANSLATION_UNITS = 200
+_IF_OPEN = re.compile(r"^\s*#\s*(if|ifdef|ifndef)\b(.*)$")
+_IF_ELSE = re.compile(r"^\s*#\s*(elif|else)\b(.*)$")
+_IF_END = re.compile(r"^\s*#\s*endif\b")
+_DROP_FLAGS = {"-c", "-MD", "-MMD", "-MP"}
+_DROP_WITH_VALUE = {"-o", "-MF", "-MT", "-MQ"}
 
 
-def _is_source_argument(value: str, source: Path, directory: Path) -> bool:
-    path = Path(value)
-    return (path if path.is_absolute() else directory / path).resolve(strict=False) == source
+@dataclass(frozen=True)
+class Verdict:
+    verdict: str  # "confirmed" | "ruled_out" | "residual"
+    proof: str
+    usr: str | None = None
+    declaration_file: str | None = None
+    preprocessor_context: str | None = None
 
 
-def _clang_args(entry: CompileCommand) -> list[str]:
-    """Keep semantic flags, remove compiler/output arguments, and absolutize paths."""
-    args = list(entry.arguments)
-    if args and not args[0].startswith("-"):
-        args = args[1:]
-    directory = _absolute(entry.directory)
-    source = _absolute(entry.file)
-    result: list[str] = []
-    paired_paths = {"-I", "-isystem", "-iquote", "-idirafter", "-include", "-imacros", "/I", "/FI"}
-    output_flags = {"-o", "-MF", "-MT", "-MQ", "-MJ", "/Fo"}
-    index = 0
-    while index < len(args):
-        arg = args[index]
-        if arg in output_flags:
-            index += 2
+@dataclass
+class AstAnalysis:
+    available: bool
+    reason: str | None = None
+    covered_files: set[str] = field(default_factory=set)  # repo-relative files seen by some TU
+    parse_errors: list[str] = field(default_factory=list)
+    translation_units: int = 0
+    # (rel_path, line, symbol) -> Verdict, for the requested candidates only
+    verdicts: dict[tuple[str, int, str], Verdict] = field(default_factory=dict)
+
+
+@dataclass
+class _Facts:
+    refs: dict[tuple[str, int, str], set[tuple[str, str | None]]] = field(default_factory=dict)  # -> {(usr, decl_file)}
+    decls: dict[tuple[str, int, str], set[str]] = field(default_factory=dict)
+    token_kinds: dict[tuple[str, int, str], set[str]] = field(default_factory=dict)
+    macro_defs: dict[tuple[str, int], str] = field(default_factory=dict)
+    expansions: dict[str, set[tuple[str, int]]] = field(default_factory=dict)
+    targets: dict[str, set[str]] = field(default_factory=dict)  # symbol -> target USRs found in dependency headers
+
+
+def _tu_args(entry: CompileCommand) -> list[str]:
+    args, skip = [], False
+    source = Path(entry.file).name
+    for arg in entry.arguments[1:]:
+        if skip:
+            skip = False
             continue
-        if arg in {"-c", "-MD", "-MMD", "-MP", "/c"}:
-            index += 1
+        if arg in _DROP_WITH_VALUE:
+            skip = True
             continue
-        if arg in paired_paths:
-            result.append(arg)
-            if index + 1 < len(args):
-                result.append(_normalize_flag_path(args[index + 1], directory))
-            index += 2
+        if arg in _DROP_FLAGS:
             continue
-        if arg.startswith(("-I", "-isystem", "-iquote", "-idirafter", "/I", "/FI")) and len(arg) > 2:
-            for flag in ("-idirafter", "-isystem", "-iquote", "-I", "/I", "/FI"):
-                if arg.startswith(flag) and len(arg) > len(flag):
-                    normalized_flag = "-I" if flag == "/I" else ("-include" if flag == "/FI" else flag)
-                    result.append(normalized_flag + _normalize_flag_path(arg[len(flag):], directory))
-                    break
-            index += 1
+        if arg == entry.file or Path(arg).name == source and not arg.startswith("-"):
             continue
-        if arg.startswith(("-o", "-MF", "-MT", "-MQ", "-MJ")) and len(arg) > 2:
-            index += 1
-            continue
-        if arg.startswith("/Fo") or _is_source_argument(arg, source, directory):
-            index += 1
-            continue
-        result.append(arg)
-        index += 1
-    return result
+        args.append(arg)
+    return args
 
 
-def _file_name(location) -> str | None:
-    file = getattr(location, "file", None)
-    return str(_absolute(file.name)) if file is not None and getattr(file, "name", None) else None
+def _rel(path: str, root: Path) -> str | None:
+    p = Path(path).resolve()
+    if p == root or root not in p.parents:
+        return None
+    rel = p.relative_to(root)
+    return None if rel.parts[0] in ("build", "vcpkg_installed") else rel.as_posix()
 
 
-def _cursor_usrs(cursor, ci) -> set[str]:
-    if cursor.kind == ci.CursorKind.OVERLOADED_DECL_REF:
+def _collect(ci, tu, root: Path, symbols: set[str], dep_dirs: list[Path], facts: _Facts) -> set[str]:
+    K = ci.CursorKind
+    ref_kinds = {K.DECL_REF_EXPR, K.MEMBER_REF_EXPR, K.OVERLOADED_DECL_REF, K.TYPE_REF, K.TEMPLATE_REF}
+    covered: set[str] = set()
+
+    def in_dep(path: str) -> bool:
+        p = Path(path).resolve()
+        return any(p == d or d in p.parents for d in dep_dirs)
+
+    for cur in tu.cursor.walk_preorder():
+        loc = cur.location
+        if loc.file is None:
+            continue
+        fname = loc.file.name
+        if cur.spelling in symbols and cur.kind.is_declaration() and in_dep(fname):
+            facts.targets.setdefault(cur.spelling, set()).add(cur.get_usr())
+            continue
+        rel = _rel(fname, root)
+        if rel is None:
+            continue
+        covered.add(rel)
+        key = (rel, loc.line, cur.spelling)
+        if cur.kind in ref_kinds and cur.spelling in symbols:
+            decls = overloaded_decls(cur) if cur.kind == K.OVERLOADED_DECL_REF else [cur.referenced]
+            for d in decls:
+                if d is not None and d.get_usr():
+                    dfile = d.location.file.name if d.location.file else None
+                    facts.refs.setdefault(key, set()).add((d.get_usr(), dfile))
+        elif cur.kind == K.USING_DECLARATION and cur.spelling in symbols:
+            for child in cur.get_children():
+                if child.kind == K.OVERLOADED_DECL_REF:
+                    for d in overloaded_decls(child):
+                        dfile = d.location.file.name if d.location.file else None
+                        facts.refs.setdefault(key, set()).add((d.get_usr(), dfile))
+        elif cur.kind == K.MACRO_DEFINITION:
+            facts.macro_defs[(rel, loc.line)] = cur.spelling
+        elif cur.kind == K.MACRO_INSTANTIATION:
+            facts.expansions.setdefault(cur.spelling, set()).add((rel, loc.line))
+        elif cur.kind.is_declaration() and cur.spelling in symbols:
+            facts.decls.setdefault(key, set()).add(cur.get_usr())
+    # Token kinds per covered project file (comments and literals rule matches out).
+    for rel in covered:
+        path = root / rel
         try:
-            return {decl.get_usr() for decl in overloaded_decls(cursor) if decl.get_usr()}
+            size = path.stat().st_size
+            file = tu.get_file(str(path))
+            extent = ci.SourceRange.from_locations(ci.SourceLocation.from_offset(tu, file, 0),
+                                                   ci.SourceLocation.from_offset(tu, file, size))
         except Exception:
-            return set()
-    referenced = getattr(cursor, "referenced", None)
-    usr = referenced.get_usr() if referenced is not None else ""
-    return {usr} if usr else set()
+            continue
+        for tok in tu.get_tokens(extent=extent):
+            for sym in symbols:
+                if sym in tok.spelling:
+                    facts.token_kinds.setdefault((rel, tok.location.line, sym), set()).add(tok.kind.name)
+    return covered
 
 
-def _usage_targets(usage: CodeUsage, changes: list[BreakingChange]) -> set[str]:
-    related = set(usage.related_change_ids)
-    return {
-        usr for change in changes if change.id in related
-        for usr in change.affected_usrs if usr
-    }
-
-
-def _preprocessor_context(source: Path, line_number: int) -> str | None:
+def _preprocessor_context(path: Path, line: int) -> str | None:
     try:
-        lines = source.read_text(encoding="utf-8", errors="replace").splitlines()
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()[: line - 1]
     except OSError:
         return None
-    active: list[str] = []
-    for line in lines[:max(0, line_number - 1)]:
-        directive = line.strip()
-        if directive.startswith(("#if ", "#ifdef ", "#ifndef ")):
-            active.append(directive)
-        elif directive.startswith(("#else", "#elif")) and active:
-            active[-1] = directive
-        elif directive.startswith("#endif") and active:
-            active.pop()
-    return " | ".join(active)[:500] or None
+    stack: list[str] = []
+    for text in lines:
+        if m := _IF_OPEN.match(text):
+            stack.append(f"#{m[1]}{m[2]}".strip())
+        elif (m := _IF_ELSE.match(text)) and stack:
+            stack[-1] = f"{stack[-1]} / #{m[1]}{m[2]}".strip()
+        elif _IF_END.match(text) and stack:
+            stack.pop()
+    return " > ".join(stack) or None
 
 
-def _classify_usage_in_tu(usage: CodeUsage, target_usrs: set[str], tu, ci, root: Path):
-    simple = usage.symbol.rsplit("::", 1)[-1]
-    candidate = _absolute(root.joinpath(*PurePosixPath(usage.file_path).parts))
-    candidate_name = str(candidate)
-    refs: dict[tuple[int, int], set[str]] = defaultdict(set)
-    declarations: dict[tuple[int, int], str] = {}
-    macro_definitions: dict[int, str] = {}
-    macro_expansions: dict[str, list[int]] = defaultdict(list)
-    target_ref_lines: set[int] = set()
-
-    ref_kinds = {
-        kind for name in (
-            "DECL_REF_EXPR", "MEMBER_REF_EXPR", "OVERLOADED_DECL_REF",
-            "TYPE_REF", "TEMPLATE_REF",
-        ) if (kind := getattr(ci.CursorKind, name, None)) is not None
-    }
-    for cursor in tu.cursor.walk_preorder():
-        filename = _file_name(cursor.location)
-        if filename != candidate_name:
-            continue
-        pos = (cursor.location.line, cursor.location.column)
-        spelling = getattr(cursor, "spelling", "")
-        if cursor.kind in ref_kinds and spelling in {simple, usage.symbol}:
-            usrs = _cursor_usrs(cursor, ci)
-            refs[pos].update(usrs)
-            if usrs & target_usrs:
-                target_ref_lines.add(cursor.location.line)
-        elif cursor.kind == getattr(ci.CursorKind, "USING_DECLARATION", None) and spelling == simple:
-            for child in cursor.get_children():
-                if child.kind in ref_kinds:
-                    usrs = _cursor_usrs(child, ci)
-                    refs[(child.location.line, child.location.column)].update(usrs)
-                    if usrs & target_usrs:
-                        target_ref_lines.add(child.location.line)
-        elif getattr(cursor.kind, "is_declaration", lambda: False)() and spelling == simple:
-            referenced = getattr(cursor, "referenced", None)
-            usr = cursor.get_usr() if hasattr(cursor, "get_usr") else ""
-            declarations[pos] = usr or (referenced.get_usr() if referenced else "")
-        elif cursor.kind == getattr(ci.CursorKind, "MACRO_DEFINITION", None):
-            macro_definitions[cursor.location.line] = spelling
-        elif cursor.kind == getattr(ci.CursorKind, "MACRO_INSTANTIATION", None):
-            macro_expansions[spelling].append(cursor.location.line)
-
-    tokens = [
-        token for token in tu.get_tokens(extent=tu.cursor.extent)
-        if _file_name(token.location) == candidate_name and token.location.line == usage.line_start
-        and (token.spelling == simple or simple in token.spelling)
-    ]
-    if not tokens:
-        return None
-
-    code_positions = {
-        (token.location.line, token.location.column)
-        for token in tokens
-        if token.kind not in {ci.TokenKind.COMMENT, ci.TokenKind.LITERAL}
-    }
-    inert_only = not code_positions
-    if inert_only:
-        return "unaffected", "Clang token is inside a comment or literal", None, None
-
-    macro_name = macro_definitions.get(usage.line_start)
-    if macro_name:
-        expansions = macro_expansions.get(macro_name, [])
-        if any(line in target_ref_lines for line in expansions):
-            matching = sorted(target_usrs)
-            usr = matching[0] if len(matching) == 1 else None
-            return "definite", f"macro {macro_name} expands to the affected declaration", usr, None
-        return "possible", f"macro {macro_name} has no resolved affected expansion", None, None
-
-    matched_refs = [refs[pos] for pos in code_positions if refs.get(pos)]
-    if matched_refs:
-        all_usrs = set().union(*matched_refs)
-        affected = all_usrs & target_usrs
-        if affected and all_usrs <= target_usrs:
-            usr = sorted(affected)[0] if len(affected) == 1 else None
-            target_cursor = next((
-                cursor for cursor in tu.cursor.walk_preorder()
-                if _file_name(cursor.location) == candidate_name
-                and (cursor.location.line, cursor.location.column) in code_positions
-                and _cursor_usrs(cursor, ci) & affected
-            ), None)
-            referenced = getattr(target_cursor, "referenced", None) if target_cursor else None
-            declaration_file = _file_name(referenced.location) if referenced and getattr(referenced, "location", None) else None
-            return "definite", f"reference resolves to affected USR {usr or sorted(affected)}", usr, declaration_file
-        if target_usrs and not affected:
-            return "unaffected", f"reference resolves to unrelated USR(s) {sorted(all_usrs)}", None, None
-        return "possible", "AST references on this line are ambiguous", None, None
-
-    declaration_positions = code_positions & set(declarations)
-    if declaration_positions == code_positions:
-        usr = next((declarations[position] for position in sorted(declaration_positions) if declarations[position]), None)
-        return "unaffected", f"source declares a different entity ({usr or 'no USR'})", None, None
-    return "possible", "identifier has no active reference node in this compile configuration", None, None
-
-
-def _combine_observations(observations: list[tuple[str, str, str | None, str | None]]):
-    verdicts = {item[0] for item in observations}
-    if len(verdicts) != 1:
-        return "possible", "compile configurations produced conflicting AST evidence", None, None
-    verdict = observations[0][0]
-    proofs = sorted({item[1] for item in observations})
-    usrs = sorted({item[2] for item in observations if item[2]})
-    files = sorted({item[3] for item in observations if item[3]})
-    return verdict, "; ".join(proofs), usrs[0] if len(usrs) == 1 else None, files[0] if len(files) == 1 else None
-
-
-def resolve_usages(
-    *, worktree: Path, usages: list[CodeUsage], changes: list[BreakingChange], compile_commands_path: Path
-) -> list[CodeUsage]:
-    """Classify candidates using exact R1 USRs; unavailable AST support is a safe fallback."""
-    if not usages or not compile_commands_path.is_file():
-        return usages
+def analyze_candidates(
+    *, worktree: Path, compile_db: Path, candidates: list[tuple[str, int, str]],
+    target_usrs: dict[str, set[str]] | None = None,
+) -> AstAnalysis:
+    """Verdicts for ``(repo-relative file, line, symbol)`` candidates."""
     try:
-        commands = load_compile_commands(compile_commands_path)
         ci = load_cindex()
-    except (ClangUnavailable, OSError, ValueError) as exc:
-        log.info("Clang AST analysis unavailable; retaining text candidates: %s", type(exc).__name__)
-        return usages
-
-    root = Path(worktree).resolve(strict=True)
-    paths: dict[str, list[int]] = defaultdict(list)
-    for index, usage in enumerate(usages):
-        source = root.joinpath(*PurePosixPath(usage.file_path).parts).resolve(strict=False)
-        paths[str(source)].append(index)
-    observations: dict[int, list[tuple[str, str, str | None, str | None]]] = defaultdict(list)
+    except ClangUnavailable as exc:
+        return AstAnalysis(available=False, reason=str(exc))
+    if not compile_db.is_file():
+        return AstAnalysis(available=False, reason=f"no compile database at {compile_db}")
+    try:
+        entries = load_compile_commands(compile_db)
+    except (ValueError, OSError) as exc:
+        return AstAnalysis(available=False, reason=f"unreadable compile database: {exc}")
+    root = worktree.resolve()
+    entries = [e for e in entries if _rel(e.file, root) is not None][:MAX_TRANSLATION_UNITS]
+    if not entries:
+        return AstAnalysis(available=False, reason="compile database has no project translation units")
+    symbols = {c[2] for c in candidates}
+    dep_dirs = [d.resolve() for d in dependency_include_dirs(entries, root)]
+    facts, result = _Facts(), AstAnalysis(available=True)
     index = ci.Index.create()
-    options = getattr(ci.TranslationUnit, "PARSE_DETAILED_PROCESSING_RECORD", 0)
+    for entry in entries:
+        tu = index.parse(entry.file, args=_tu_args(entry),
+                         options=ci.TranslationUnit.PARSE_DETAILED_PROCESSING_RECORD)
+        result.translation_units += 1
+        result.parse_errors += [f"{d.location.file}:{d.location.line}: {d.spelling}"
+                                for d in tu.diagnostics if d.severity >= ci.Diagnostic.Error][:5]
+        result.covered_files |= _collect(ci, tu, root, symbols, dep_dirs, facts)
+    targets = {s: set(facts.targets.get(s, set())) | set((target_usrs or {}).get(s, set())) for s in symbols}
 
-    for entry in commands:
-        try:
-            source_file = _absolute(entry.file)
-            try:
-                source_file.relative_to(root)
-            except ValueError:
-                continue
-            if not source_file.is_file():
-                continue
-            tu = index.parse(entry.file, args=_clang_args(entry), options=options)
-            tokens_by_location: dict[tuple[str, int], bool] = {}
-            for token in tu.get_tokens(extent=tu.cursor.extent):
-                filename = _file_name(token.location)
-                if filename is not None:
-                    tokens_by_location[(filename, token.location.line)] = True
-            for filename, usage_indexes in paths.items():
-                if not any((filename, usages[i].line_start) in tokens_by_location for i in usage_indexes):
-                    continue
-                for usage_index in usage_indexes:
-                    usage = usages[usage_index]
-                    if (filename, usage.line_start) not in tokens_by_location:
-                        continue
-                    target_usrs = _usage_targets(usage, changes)
-                    outcome = _classify_usage_in_tu(usage, target_usrs, tu, ci, root)
-                    if outcome is not None:
-                        observations[usage_index].append(outcome)
-        except Exception as exc:
-            log.debug("Clang failed to analyze a translation unit (%s)", type(exc).__name__)
-
-    resolved: list[CodeUsage] = []
-    for index, usage in enumerate(usages):
-        evidence = observations.get(index)
-        if not evidence:
-            resolved.append(usage)
+    for rel, line, sym in candidates:
+        if rel not in result.covered_files:
             continue
-        verdict, proof, usr, declaration_file = _combine_observations(evidence)
-        impact = ImpactLevel(verdict)
-        data = usage.model_dump(mode="python")
-        data.update(
-            impact=impact,
-            confidence=0.99 if impact == ImpactLevel.DEFINITE else (1.0 if impact == ImpactLevel.UNAFFECTED else usage.confidence),
-            analysis_method=AnalysisMethod.CLANG_AST,
-            resolved_by=ResolutionLayer.CLANG_AST,
-            resolution_proof=proof,
-            resolved_usr=usr,
-            declaration_file=declaration_file,
-            preprocessor_context=(
-                _preprocessor_context(root.joinpath(*PurePosixPath(usage.file_path).parts), usage.line_start)
-                if impact == ImpactLevel.POSSIBLE else usage.preprocessor_context
-            ),
-        )
-        resolved.append(CodeUsage.model_validate(data))
-    return resolved
+        key, tgt = (rel, line, sym), targets.get(sym, set())
+        refs = facts.refs.get(key, set())
+        hit = sorted(u for u, _ in refs if u in tgt)
+        if hit:
+            dfile = next((f for u, f in refs if u == hit[0]), None)
+            result.verdicts[key] = Verdict("confirmed", f"references {hit[0]}", hit[0], dfile)
+        elif refs:
+            other = sorted(u for u, _ in refs)
+            result.verdicts[key] = Verdict("ruled_out", f"references a different entity {other}")
+        elif facts.decls.get(key):
+            usrs = facts.decls[key]
+            if usrs & tgt:
+                usr = sorted(usrs & tgt)[0]
+                result.verdicts[key] = Verdict("confirmed", f"re-declares the changed API {usr}", usr)
+            else:
+                result.verdicts[key] = Verdict("ruled_out", f"declares a different entity {sorted(usrs)}")
+        elif (rel, line) in facts.macro_defs:
+            name = facts.macro_defs[(rel, line)]
+            target_lines = {(r, l) for (r, l, _s), rs in facts.refs.items() if {u for u, _ in rs} & tgt}
+            used = [l for (r, l) in facts.expansions.get(name, set()) if (r, l) in target_lines]
+            if used:
+                result.verdicts[key] = Verdict("confirmed", f"body of macro {name}; expansions at lines "
+                                               f"{sorted(set(used))} resolve to the changed API (edit the macro)")
+            else:
+                result.verdicts[key] = Verdict("residual", f"in macro {name} with no resolved expansion",
+                                               preprocessor_context=_preprocessor_context(root / rel, line))
+        elif (kinds := facts.token_kinds.get(key)) and kinds <= {"COMMENT", "LITERAL"}:
+            where = "a comment" if kinds == {"COMMENT"} else "a string/char literal"
+            result.verdicts[key] = Verdict("ruled_out", f"inside {where}")
+        else:
+            result.verdicts[key] = Verdict(
+                "residual", "no AST node in this build configuration (inactive preprocessor branch or "
+                            "uncompiled code)", preprocessor_context=_preprocessor_context(root / rel, line))
+    return result

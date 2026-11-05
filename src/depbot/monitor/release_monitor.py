@@ -25,7 +25,7 @@ class ReleaseWatch:
     dependency_name: str
     upstream_repo: str
     current_version: str
-    tag_prefix: str = ""
+    tag_prefix: str = ""  # e.g. "fmt-" for tags like "fmt-11.0.2"; stripped before comparing
 
 
 @dataclass(frozen=True)
@@ -44,13 +44,7 @@ class _StopEvent(Protocol):
     def wait(self, timeout: float) -> bool: ...
 
 
-def _normalize_version(version: str, *, tag_prefix: str = "", require_prefix: bool = False) -> str:
-    if tag_prefix and version.startswith(tag_prefix):
-        version = version[len(tag_prefix):]
-    elif tag_prefix and require_prefix:
-        raise ReleaseMonitorError(
-            f"release tag {version!r} does not start with configured prefix {tag_prefix!r}"
-        )
+def _normalize_version(version: str) -> str:
     return version[1:] if version.startswith("v") else version
 
 
@@ -67,8 +61,16 @@ def poll_release_watch(watch: ReleaseWatch) -> ReleaseEvent | None:
             f"GitHub returned a prerelease for {watch.dependency_name} at {watch.upstream_repo}"
         )
 
-    current = _normalize_version(watch.current_version, tag_prefix=watch.tag_prefix)
-    target = _normalize_version(release.tag_name, tag_prefix=watch.tag_prefix, require_prefix=True)
+    tag = release.tag_name
+    if watch.tag_prefix:
+        if not tag.startswith(watch.tag_prefix):
+            raise ReleaseMonitorError(
+                f"latest release tag {tag!r} of {watch.upstream_repo} does not start with "
+                f"the configured tag_prefix {watch.tag_prefix!r}"
+            )
+        tag = tag[len(watch.tag_prefix):]
+    current = _normalize_version(watch.current_version)
+    target = _normalize_version(tag)
     try:
         is_newer = compare(current, target) < 0
     except UnparseableVersion as exc:

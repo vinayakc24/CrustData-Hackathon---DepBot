@@ -115,6 +115,8 @@ class DepBotState(BaseModel):
     dependency: Dependency
     artifacts_dir: str
     repo_facts: dict[str, object] = Field(default_factory=dict)
+    policy_decisions: list[dict[str, object]] = Field(default_factory=list)
+    repair_attempt_details: list[dict[str, object]] = Field(default_factory=list)
     upstream_repo: str | None = None
     breaking_changes: list[BreakingChange] = Field(default_factory=list)
     usages: list[CodeUsage] = Field(default_factory=list)

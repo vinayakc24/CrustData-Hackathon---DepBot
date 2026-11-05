@@ -59,6 +59,20 @@ def _repository_path(upstream_repo: str) -> str:
     return "/".join(parts)
 
 
+TOKEN_ENV_VAR = "DEPBOT_GITHUB_TOKEN"  # optional, read-only; never the PR-publishing credential
+
+
+def _api_request(url: str) -> urllib.request.Request:
+    request = urllib.request.Request(
+        url, headers={"Accept": "application/vnd.github+json", "User-Agent": "DepBot-release-research"}
+    )
+    token = os.environ.get(TOKEN_ENV_VAR, "").strip()
+    if token:
+        # Unredirected: never forwarded if GitHub redirects to another host.
+        request.add_unredirected_header("Authorization", f"Bearer {token}")
+    return request
+
+
 def _normalize_version(version: str) -> str:
     return version[1:] if version.startswith("v") else version
 
@@ -75,14 +89,6 @@ def _read_response(response, max_bytes: int) -> bytes:
             raise GitHubReleaseError(f"GitHub API response exceeds {max_bytes} byte limit")
         chunks.append(chunk)
     return b"".join(chunks)
-
-
-def _api_headers() -> dict[str, str]:
-    headers = {"Accept": "application/vnd.github+json", "User-Agent": "DepBot-release-research"}
-    token = os.environ.get("GITHUB_TOKEN")
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    return headers
 
 
 def _parse_release(item: object) -> GitHubRelease:
@@ -127,10 +133,7 @@ def get_latest_github_release(
     ):
         raise GitHubReleaseError("timeout_seconds and max_response_bytes must be positive and finite")
 
-    request = urllib.request.Request(
-        f"https://api.github.com/repos/{repo}/releases/latest",
-        headers=_api_headers(),
-    )
+    request = _api_request(f"https://api.github.com/repos/{repo}/releases/latest")
     opener = urllib.request.build_opener()
     try:
         with opener.open(request, timeout=timeout_seconds) as response:
@@ -168,8 +171,10 @@ def find_github_release(
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
     max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
     max_pages: int = DEFAULT_MAX_PAGES,
+    exact_tag: str | None = None,
 ) -> GitHubRelease:
-    """Find one release whose tag exactly matches target_version (optional v)."""
+    """Find one release whose tag matches target_version (optional v), or exactly
+    ``exact_tag`` when given (e.g. taken from a release-page URL like ``fmt-11.0.2``)."""
     repo = _repository_path(upstream_repo)
     if not isinstance(target_version, str) or not target_version:
         raise GitHubReleaseError("target_version must be a non-empty string")
@@ -180,10 +185,7 @@ def find_github_release(
     opener = urllib.request.build_opener()
     for page in range(1, max_pages + 1):
         url = f"https://api.github.com/repos/{repo}/releases?per_page={DEFAULT_PER_PAGE}&page={page}"
-        request = urllib.request.Request(
-            url,
-            headers=_api_headers(),
-        )
+        request = _api_request(url)
         try:
             with opener.open(request, timeout=timeout_seconds) as response:
                 raw = _read_response(response, max_response_bytes)
@@ -202,7 +204,10 @@ def find_github_release(
         if not isinstance(payload, list):
             raise GitHubReleaseError("GitHub API release response must be a JSON list")
         page_releases = [_parse_release(entry) for entry in payload]
-        matches.extend(release for release in page_releases if _normalize_version(release.tag_name) == target)
+        matches.extend(
+            release for release in page_releases
+            if (release.tag_name == exact_tag if exact_tag else _normalize_version(release.tag_name) == target)
+        )
         if len(payload) < DEFAULT_PER_PAGE:
             break
     else:

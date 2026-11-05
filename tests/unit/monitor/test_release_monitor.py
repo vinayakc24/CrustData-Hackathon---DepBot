@@ -87,7 +87,7 @@ def test_configured_tag_prefix_is_removed_for_version_comparison(monkeypatch) ->
 
 def test_configured_tag_prefix_mismatch_is_reported(monkeypatch) -> None:
     _mock_release(monkeypatch, _release("v2.0.0"))
-    with pytest.raises(ReleaseMonitorError, match="does not start with configured prefix"):
+    with pytest.raises(ReleaseMonitorError, match="does not start with the configured tag_prefix"):
         poll_release_watch(_watch("1.0.0", tag_prefix="fmt-"))
 
 

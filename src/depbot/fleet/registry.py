@@ -14,6 +14,7 @@ Example::
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import yaml
@@ -27,6 +28,24 @@ class RegistryError(ValueError):
     pass
 
 
+class DependencyWatch(BaseModel):
+    """An upstream project `depbot monitor` polls for new releases."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    dependency_name: str  # as declared in manifests, e.g. "fmt"
+    upstream_repo: str  # GitHub "owner/name"
+    tag_prefix: str = ""  # e.g. "fmt-" when release tags look like "fmt-11.0.2"
+    enabled: bool = True
+
+    @model_validator(mode="after")
+    def _repo_shape(self) -> DependencyWatch:
+        parts = self.upstream_repo.strip().strip("/").split("/")
+        if len(parts) != 2 or not all(re.fullmatch(r"[A-Za-z0-9_.-]+", p) for p in parts):
+            raise ValueError(f"upstream_repo must be 'owner/name', got {self.upstream_repo!r}")
+        return self
+
+
 class FleetConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -34,9 +53,13 @@ class FleetConfig(BaseModel):
     repositories: list[RepositoryRecord]
     policies: dict[str, UpgradePolicy] = Field(default_factory=dict)
     default_policy_id: str = "default"
+    watches: list[DependencyWatch] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _check(self) -> FleetConfig:
+        watched = [w.dependency_name for w in self.watches]
+        if len(watched) != len(set(watched)):
+            raise ValueError("each dependency may be watched only once")
         ids = [r.repository_id for r in self.repositories]
         dupes = {i for i in ids if ids.count(i) > 1}
         if dupes:

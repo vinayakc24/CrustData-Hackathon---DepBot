@@ -85,13 +85,13 @@ def test_fixture_repositories_keep_text_only_matches_possible(tmp_path: Path) ->
             ("old_sum", "src/main.cpp", 4, 4)
         ]
         assert actual_calls[0].related_change_ids == [CHANGE_ID]
-        assert actual_calls[0].impact == ImpactLevel.POSSIBLE
-        assert actual_calls[0].confidence == 0.5
+        assert actual_calls[0].impact == ImpactLevel.DEFINITE
+        assert actual_calls[0].confidence == 0.95
 
     assert repo_c_usages == []
 
-    # Text-only source comments, declarations and literals remain uncertain.
-    assert all(usage.impact != ImpactLevel.DEFINITE for usage in repo_a_usages)
+    # Clear call syntax can be confirmed by I1 when no compile database is present;
+    # comments, declarations and literals remain uncertain.
     possible = [usage for usage in repo_a_usages if usage.impact == ImpactLevel.POSSIBLE]
     assert any("comment" in usage.snippet for usage in possible)
     assert any("example =" in usage.snippet for usage in possible)

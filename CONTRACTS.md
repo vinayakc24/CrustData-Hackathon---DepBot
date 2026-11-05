@@ -1,4 +1,4 @@
-# DepBot Contract Handoff — v0.6.0
+# DepBot Contract Handoff — v0.7.0
 
 Owner: **Member A**. These contracts are frozen for the first end-to-end demo.
 B and C implement against them; if you need a change, propose it to A (field,
@@ -331,6 +331,23 @@ target, not just the target version's section.
 
 ## 7. Change log
 
+- 0.7.0 — the cascades are implemented end to end (A, at the owner's request, in B's and C's areas):
+  - **Impact (§9):** `find_impacted_usages` runs I1 text → I2 `code_intelligence/clang_analyzer.py`
+    (USR resolution over the baseline compile database) → I3 probe diagnostics → I4 LLM for the residue.
+    With I2 active, only AST- or compiler-proven usages are `definite`, and ruled-out matches are kept as
+    `unaffected` with proof. Layer statistics go to `artifacts_dir/impact_layers.json`.
+  - **LLM residue classification:** identified by integer `id`, returns `{id, classification, reason}`,
+    and degrades on bad output (never blocks).
+  - **Research (§10):** `research_release` runs R1 (`api_diff.json` written) → R2 → R3 (leftovers only, additive).
+    It reads every changelog section in the version range and sets `source` on every change. GitHub release-page
+    URLs use the API Markdown body (exact tag).
+  - **GitHub:** optional read-only `DEPBOT_GITHUB_TOKEN` for API calls (non-redirected header).
+    `ReleaseWatch.tag_prefix` / fleet `watches[].tag_prefix` handle tags like `fmt-11.0.2`.
+  - **Verification:** presets follow `CMakeUserPresets.json` includes; `VerificationResult.diagnostics` is filled
+    from full logs (`verification/diagnostics.py`).
+- 0.6.1 — additive: `FleetConfig.watches: list[DependencyWatch]` (`dependency_name`, `upstream_repo`, `enabled`)
+  and `depbot monitor` (`depbot.fleet.monitor`). It uses B's `depbot.monitor.release_monitor.poll_once` unchanged and
+  recomputes watch versions from the inventory every cycle.
 - 0.6.0 — additive: `ChangeSource` and `BreakingChange.source` / `.affected_usrs`; R1 header API diff
   (`depbot.research.header_diff`, written by A at the team's request; B wires it); shared libclang loader
   `depbot.clang_support` (also for B's AST impact layer); engine runs the probe **before** research and saves

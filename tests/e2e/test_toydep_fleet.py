@@ -1,18 +1,15 @@
-"""Offline three-repository acceptance path through Member A's real fleet engine."""
+"""Three-repository acceptance run using real Conan, CMake, and CTest commands."""
 
+import json
 import shutil
 import subprocess
-import os
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from depbot.fleet.registry import Fleet, FleetConfig
 from depbot.fleet.runner import run_fleet
-from depbot.interfaces import PipelineStages
-from depbot.migration.patch_generator import generate_patches
-from depbot.migration.patch_validator import validate_and_apply
-from depbot.migration.planner import plan_migration
 from depbot.models import (
     AnalysisMethod,
     BreakingChange,
@@ -24,27 +21,12 @@ from depbot.models import (
     RepositoryRecord,
     UpgradePolicy,
 )
-from depbot.package_managers.conan import ConanAdapter
-from depbot.reporting.report_generator import write_repository_report
-from depbot.verification.pipeline import run_verification
+from depbot.orchestrator import load_default_stages
+from depbot.package_managers.conan import CONAN_HOME_ENV
+from depbot.package_managers.conan_setup import prepare_local_packages
 
 
 FIXTURE_ROOT = Path(__file__).resolve().parents[1] / "fixtures" / "toydep"
-REPO_ROOT = Path(__file__).resolve().parents[2]
-
-
-class _FixtureAdapter(ConanAdapter):
-    def command_env(self):
-        if shutil.which("mingw32-make"):
-            return {"CMAKE_GENERATOR": "MinGW Makefiles"}
-        if os.name != "nt":
-            return {"CMAKE_GENERATOR": "Unix Makefiles"}
-        return {}
-
-    def install_args(self, repo_root: Path, *, build_type="Release"):
-        version = self.find_dependency(repo_root, "toydep").version
-        source = FIXTURE_ROOT / ("v1" if version == "1.0.0" else "v2")
-        return ["cmake", "-E", "copy_directory", str(source), str(repo_root / "build" / "dependency" / "toydep")]
 
 
 def _research(*, event, dependency, artifacts_dir):
@@ -62,37 +44,27 @@ def _research(*, event, dependency, artifacts_dir):
     )]
 
 
-def _impact(*, worktree, changes, artifacts_dir):
-    usages = []
-    for source in sorted(worktree.glob("src/**/*.cpp")):
-        for line_number, text in enumerate(source.read_text(encoding="utf-8").splitlines(), 1):
-            if "old_sum" in text:
-                usages.append(CodeUsage(
-                    symbol="old_sum",
-                    file_path=source.relative_to(worktree).as_posix(),
-                    line_start=line_number,
-                    line_end=line_number,
-                    snippet=text.strip(),
-                    analysis_method=AnalysisMethod.RIPGREP,
-                    impact=ImpactLevel.DEFINITE,
-                    related_change_ids=[changes[0].id],
-                    confidence=0.99,
-                ))
-    return usages
-
-
-@pytest.mark.skipif(shutil.which("cmake") is None, reason="CMake is not installed")
+@pytest.mark.skipif(
+    shutil.which("conan") is None or shutil.which("cmake") is None,
+    reason="Conan and CMake must be on PATH",
+)
 def test_release_migrates_two_repositories_and_skips_current_one(tmp_path: Path, monkeypatch):
+    conan_home = tmp_path / "conan-home"
+    recipes = [FIXTURE_ROOT / "v1", FIXTURE_ROOT / "v2"]
+    setup_steps = prepare_local_packages(recipes, conan_home)
+    assert len(setup_steps) == len(recipes) + 2
+    assert all(step.succeeded for step in setup_steps), [
+        f"{step.label}: {step.exit_code}; {step.output_tail}" for step in setup_steps
+    ]
+    monkeypatch.setenv(CONAN_HOME_ENV, str(conan_home))
+
     source_roots = {}
     for repo_name in ("repo_a", "repo_b", "repo_c"):
         root = tmp_path / "sources" / repo_name
         shutil.copytree(FIXTURE_ROOT / "repositories" / repo_name, root)
-        (root / "vendor").mkdir(exist_ok=True)
-        shutil.copytree(FIXTURE_ROOT / ("v1" if repo_name != "repo_c" else "v2"), root / "vendor" / "toydep")
         source_roots[repo_name] = root
-    # Keep the registered repositories clean and nested under this fixture repo.
-    # The production worktree helper will then take its isolated snapshot path,
-    # avoiding a clone and preserving the original fixture tree.
+
+    # Use a clean parent Git root so the production working-copy path is exercised.
     source_repo = tmp_path / "sources"
     subprocess.run(["git", "init", "-q", "-b", "main"], cwd=source_repo, check=True, shell=False)
     subprocess.run(
@@ -100,18 +72,10 @@ def test_release_migrates_two_repositories_and_skips_current_one(tmp_path: Path,
         cwd=source_repo, check=True, shell=False,
     )
     subprocess.run(
-        ["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.com", "commit", "-qm", "fixture sources"],
+        ["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.com",
+         "commit", "-qm", "fixture sources"],
         cwd=source_repo, check=True, shell=False,
     )
-
-    # The test substitutes only the package download with a local deterministic
-    # CMake fixture. Manifest parsing/update, worktrees, patches, builds, tests,
-    # selection, job outcomes and summary are the production implementations.
-    import depbot.fleet.dependency_index as index_module
-    import depbot.orchestrator as orchestrator_module
-
-    monkeypatch.setattr(index_module, "detect_adapter", lambda _root: _FixtureAdapter())
-    monkeypatch.setattr(orchestrator_module, "detect_adapter", lambda _root: _FixtureAdapter())
 
     repositories = [
         RepositoryRecord(
@@ -130,11 +94,7 @@ def test_release_migrates_two_repositories_and_skips_current_one(tmp_path: Path,
         minimum_migration_confidence=0.80,
     )
     fleet = Fleet(
-        FleetConfig(
-            fleet_id="toydep-fleet",
-            repositories=repositories,
-            policies={"default": policy},
-        ),
+        FleetConfig(fleet_id="toydep-fleet", repositories=repositories, policies={"default": policy}),
         tmp_path,
     )
     event = ReleaseEvent(
@@ -145,33 +105,70 @@ def test_release_migrates_two_repositories_and_skips_current_one(tmp_path: Path,
         target_version="2.0.0",
         source_url=(FIXTURE_ROOT / "release-notes-2.0.0.md").as_uri(),
     )
-    stages = PipelineStages(
-        research=_research,
-        impact=_impact,
-        plan=plan_migration,
-        patch=generate_patches,
-        apply=validate_and_apply,
-        verify=run_verification,
-        report=write_repository_report,
-    )
+
+    research_versions: list[str] = []
+
+    def research(*, event, dependency, artifacts_dir):
+        research_versions.append(dependency.current_version)
+        return _research(event=event, dependency=dependency, artifacts_dir=artifacts_dir)
+
+    stages = replace(load_default_stages(), research=research)
     summary = run_fleet(
         event,
         fleet,
         stages=stages,
         state_dir=tmp_path / "state",
-        artifacts_root=REPO_ROOT / "artifacts" / "member-c-e2e",
+        artifacts_root=tmp_path / "artifacts",
     )
 
-    assert (summary.repositories_considered, summary.repositories_affected,
-            summary.repositories_skipped, summary.repositories_verified,
-            summary.repositories_failed_or_blocked) == (3, 2, 1, 2, 0)
+    assert (
+        summary.repositories_considered,
+        summary.repositories_affected,
+        summary.repositories_skipped,
+        summary.repositories_verified,
+        summary.repositories_failed_or_blocked,
+    ) == (3, 2, 1, 2, 0)
     by_id = {outcome.repository_id: outcome for outcome in summary.outcomes}
+    assert by_id["repo_a"].status.value == by_id["repo_b"].status.value == "verified"
     assert by_id["repo_a"].verification_passed and by_id["repo_b"].verification_passed
     assert by_id["repo_c"].status.value == "skipped"
     assert "already on toydep 2.0.0" in by_id["repo_c"].reason
+    assert by_id["repo_c"].run_id is None
+    assert research_versions == ["1.0.0", "1.0.0"]
+
+    expected_commands = {
+        "dependency_install": "conan",
+        "configure": "cmake",
+        "build": "cmake",
+        "tests": "ctest",
+    }
     for name in ("repo_a", "repo_b"):
-        report = Path(by_id[name].report_path)
-        assert report.is_file()
-        assert "Upgraded verification passed: **True**" in report.read_text(encoding="utf-8")
-        assert "old_sum" in (source_roots[name] / "src" / "main.cpp").read_text(encoding="utf-8")
-    assert "toydep::product" in (source_roots["repo_c"] / "src" / "main.cpp").read_text(encoding="utf-8")
+        report_path = Path(by_id[name].report_path)
+        assert report_path.is_file()
+        assert report_path.name == "upgrade-report.md"
+        report = report_path.read_text(encoding="utf-8")
+        assert "Upgraded verification passed: **True**" in report
+        assert "1 passed, 0 failed" in report
+        state = json.loads((report_path.parent / "state.json").read_text(encoding="utf-8"))
+        commands = {result["command_label"]: result for result in state["command_results"]}
+        # Baseline (old version) and upgraded (migrated code) must fully pass.
+        for phase in ("baseline", "upgraded"):
+            for step, executable in expected_commands.items():
+                result = commands[f"{phase}.{step}"]
+                assert result["exit_code"] == 0, result
+                assert not result["timed_out"], result
+                assert Path(result["args"][0]).name.lower().startswith(executable), result
+        # The probe builds the *unmigrated* code against the new version: install and
+        # configure succeed, the build must fail, and its diagnostics locate the break.
+        for step in ("dependency_install", "configure"):
+            assert commands[f"probe.{step}"]["exit_code"] == 0, commands[f"probe.{step}"]
+        probe_build = commands["probe.build"]
+        assert probe_build["exit_code"] not in (0, None), probe_build
+        assert "probe.tests" not in commands  # tests never run on a failed build
+        errors = [d for d in state["probe"]["diagnostics"] if d["severity"] == "error"]
+        assert errors and errors[0]["file_path"] == "src/main.cpp", state["probe"]["diagnostics"]
+        assert "old_sum" in errors[0]["message"]
+        probe_diagnostics = json.loads((report_path.parent / "probe" / "diagnostics.json").read_text())
+        assert probe_diagnostics == state["probe"]["diagnostics"]
+    # repo_c is selected as already current before research or verification starts.
+    assert "2.0.0" not in research_versions

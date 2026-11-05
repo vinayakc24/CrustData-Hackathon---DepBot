@@ -5,7 +5,9 @@ working-copy isolation, manifest update and scope checks run for real.
 """
 
 import json
+import shutil
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -29,6 +31,14 @@ from depbot.orchestrator import load_default_stages, run_repository_job
 from depbot.state import JobStatus
 
 MAIN = "#include <toydep/toydep.h>\nint main() { return old_sum(2, 3) == 5 ? 0 : 1; }\n"
+
+
+@pytest.fixture(autouse=True)
+def conan_available_for_fake_stage_tests(monkeypatch):
+    """Only the missing-tool test needs real PATH detection; other tests inject stages."""
+    real_which = shutil.which
+    monkeypatch.setattr(shutil, "which", lambda name: "conan" if name == "conan" else real_which(name))
+
 DIFF = """\
 --- a/src/main.cpp
 +++ b/src/main.cpp
@@ -131,6 +141,7 @@ def test_happy_path_verifies_and_never_touches_source(job, tmp_path):
                  "patches/manifest.diff", "patches/final.diff", "state.json", "upgrade-report.md"):
         assert (art / name).is_file(), name
     saved = json.loads((art / "state.json").read_text())
+    assert saved["policy_decisions"] == state.policy_decisions and saved["policy_decisions"]
     assert [h["to_status"] for h in saved["history"]] == [
         "INSPECTED", "RESEARCHED", "IMPACT_ANALYZED", "PLANNED", "PATCHED", "VERIFIED"]
     assert state.baseline.phase == "baseline" and state.probe.phase == "probe"
@@ -162,6 +173,35 @@ def test_failing_baseline_blocks_before_any_edit(job, tmp_path):
     state, outcome = run_repository_job(job, _stages(verify=broken), artifacts_root=tmp_path / "a")
     assert state.status == JobStatus.BLOCKED and "baseline" in state.status_reason
     assert state.manifest_change is None
+
+
+def test_failing_upgraded_tests_report_failed_names(job, tmp_path):
+    def verify(phase, **_kwargs):
+        if phase.value != "upgraded":
+            return _passing(phase)
+        return VerificationResult(
+            phase=phase,
+            dependency_install=_ok("install"),
+            configure=_ok("configure"),
+            build=_ok("build"),
+            tests=CommandResult(
+                command_label="upgraded.tests",
+                args=["ctest", "--output-on-failure"],
+                cwd="/w",
+                exit_code=8,
+                duration_seconds=0.01,
+                stdout_tail="0% tests passed, 1 tests failed out of 1",
+            ),
+            tests_passed=0,
+            tests_failed=1,
+            failed_test_names=["repo_a_test"],
+            passed=False,
+        )
+
+    state, outcome = run_repository_job(job, _stages(verify=verify), artifacts_root=tmp_path / "a")
+    assert state.status == JobStatus.FAILED_TESTS
+    assert state.verification.failed_test_names == ["repo_a_test"]
+    assert "repo_a_test" in state.status_reason
 
 
 def test_out_of_scope_patch_is_blocked(job, tmp_path):
@@ -259,6 +299,16 @@ def test_repair_fixes_build_then_verifies(job, tmp_path):
     assert state.repair_attempts == 1 and calls["upgraded"] == 2
     assert "// repaired" in (tmp_path / "a" / state.run_id / "worktree" / "src" / "main.cpp").read_text()
     assert (tmp_path / "a" / state.run_id / "patches" / "r1.diff").is_file()
+    assert state.repair_attempt_details == [{
+        "attempt": 1,
+        "patches": [{
+            "patch_id": "r1",
+            "paths": ["src/main.cpp"],
+            "artifact_path": str(Path(state.artifacts_dir) / "patches" / "r1.diff"),
+            "status": "applied",
+            "rejection_reason": None,
+        }],
+    }]
 
 
 def test_repair_loop_stops_at_policy_limit(job, tmp_path):
@@ -292,6 +342,7 @@ def test_repair_giving_up_keeps_failure(job, tmp_path):
     state, _ = run_repository_job(job, _stages(verify=verify, repair=lambda **kw: []), artifacts_root=tmp_path / "a")
     assert state.status == JobStatus.FAILED_BUILD and "no repair proposed" in state.status_reason
     assert state.repair_attempts == 0
+    assert state.repair_attempt_details == [{"attempt": 1, "patches": []}]
 
 
 @pytest.mark.real_tooling

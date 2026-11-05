@@ -2,7 +2,6 @@
 
 import shutil
 import subprocess
-import os
 from pathlib import Path
 
 import pytest
@@ -21,25 +20,21 @@ from depbot.models import (
     UpgradePolicy,
     VerificationPhase,
 )
-from depbot.package_managers.conan import ConanAdapter
+from depbot.package_managers.conan import CONAN_HOME_ENV, ConanAdapter
+from depbot.package_managers.conan_setup import prepare_local_packages
 from depbot.verification.pipeline import run_verification
 
 
 FIXTURE_ROOT = Path(__file__).resolve().parents[1] / "fixtures" / "toydep"
 
 
-class _FixtureAdapter(ConanAdapter):
-    def command_env(self):
-        if shutil.which("mingw32-make"):
-            return {"CMAKE_GENERATOR": "MinGW Makefiles"}
-        if os.name != "nt":
-            return {"CMAKE_GENERATOR": "Unix Makefiles"}
-        return {}
-
-    def install_args(self, repo_root: Path, *, build_type="Release"):
-        version = self.find_dependency(repo_root, "toydep").version
-        source = FIXTURE_ROOT / ("v1" if version == "1.0.0" else "v2")
-        return ["cmake", "-E", "copy_directory", str(source), str(repo_root / "build" / "dependency" / "toydep")]
+@pytest.fixture(scope="module")
+def conan_home(tmp_path_factory):
+    """Build the toydep v1/v2 recipes once into an isolated, offline Conan home."""
+    home = tmp_path_factory.mktemp("conan-home")
+    steps = prepare_local_packages([FIXTURE_ROOT / "v1", FIXTURE_ROOT / "v2"], home)
+    assert all(s.succeeded for s in steps), [f"{s.label}: {s.exit_code}; {s.output_tail}" for s in steps]
+    return home
 
 
 def _initialize_git(path: Path):
@@ -48,15 +43,17 @@ def _initialize_git(path: Path):
     subprocess.run(["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.com", "commit", "-qm", "fixture baseline"], cwd=path, check=True, shell=False)
 
 
-@pytest.mark.skipif(shutil.which("cmake") is None, reason="CMake is not installed")
-def test_two_repositories_migrate_and_pass_real_cmake_ctest(tmp_path: Path):
+@pytest.mark.skipif(
+    shutil.which("conan") is None or shutil.which("cmake") is None,
+    reason="Conan and CMake must be on PATH",
+)
+def test_two_repositories_migrate_and_pass_real_cmake_ctest(tmp_path: Path, conan_home, monkeypatch):
+    monkeypatch.setenv(CONAN_HOME_ENV, str(conan_home))
     for repo_name in ("repo_a", "repo_b"):
         worktree = tmp_path / repo_name
         shutil.copytree(FIXTURE_ROOT / "repositories" / repo_name, worktree)
-        (worktree / "vendor").mkdir(exist_ok=True)
-        shutil.copytree(FIXTURE_ROOT / "v1", worktree / "vendor" / "toydep")
         _initialize_git(worktree)
-        adapter = _FixtureAdapter()
+        adapter = ConanAdapter()
         baseline = run_verification(
             worktree=worktree,
             adapter=adapter,
