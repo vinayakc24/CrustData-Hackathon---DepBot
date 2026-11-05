@@ -201,10 +201,19 @@ def test_revalidation_skips_repo_already_upgraded_since_indexing(job, tmp_path):
 
 
 def test_unintegrated_stages_block_honestly(job, tmp_path):
-    stages = load_default_stages()
+    from depbot.orchestrator import _not_integrated
+    stages = _stages(research=_not_integrated("research", "depbot.research.x.research_release"))
     state, outcome = run_repository_job(job, stages, artifacts_root=tmp_path / "a")
     assert outcome.status == OutcomeStatus.BLOCKED
-    assert "not integrated yet" in state.status_reason
+    assert "stage 'research' not integrated yet" in state.status_reason
+
+
+def test_default_stages_resolve_integrated_modules():
+    stages = load_default_stages()
+    assert stages.verify.__module__ == "depbot.verification.pipeline"
+    assert stages.plan.__module__ == "depbot.migration.planner"
+    assert stages.impact.__module__ == "depbot.code_intelligence.impact_analyzer"
+    assert stages.repair is not None
 
 
 # ----------------------------------------------------------------- repair loop

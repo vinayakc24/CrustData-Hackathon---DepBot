@@ -20,6 +20,7 @@ from depbot.fleet.registry import Fleet
 from depbot.fleet.report import render_fleet_markdown
 from depbot.fleet.selection import RepositorySelection, select_repositories
 from depbot.interfaces import PipelineStages
+from depbot.llm.runtime import LLMFactory
 from depbot.models import (
     FleetRunSummary,
     OutcomeStatus,
@@ -53,11 +54,13 @@ def _job_for(
 
 def _run_one(
     event: ReleaseEvent, sel: RepositorySelection, fleet: Fleet, stages: PipelineStages,
-    artifacts_root: Path, create_pr: bool,
+    artifacts_root: Path, create_pr: bool, llm_factory: LLMFactory | None,
 ) -> RepositoryUpgradeOutcome:
     try:
         job = _job_for(event, sel, fleet, create_pr)
-        _, outcome = run_repository_job(job, stages, artifacts_root=artifacts_root)
+        _, outcome = run_repository_job(
+            job, stages, artifacts_root=artifacts_root, llm_factory=llm_factory
+        )
         return outcome
     except Exception as exc:  # isolate: never let one repository stop the fleet
         log.exception("fleet job for %s crashed", sel.repository.repository_id)
@@ -81,7 +84,9 @@ def run_fleet(
     artifacts_root: Path,
     force: bool = False,
     create_pr: bool = False,
+    llm_factory: LLMFactory | None = None,
 ) -> FleetRunSummary:
+    """``llm_factory`` is called once per job so every job gets its own LLM client."""
     events = EventLog(state_dir / "events.json")
     duplicate = events.find_duplicate(event)
     if duplicate is not None and not force:
@@ -103,7 +108,7 @@ def run_fleet(
     for sel in selections:
         if sel.eligible:
             log.info("running job for %s", sel.repository.repository_id)
-            outcomes.append(_run_one(event, sel, fleet, stages, artifacts_root, create_pr))
+            outcomes.append(_run_one(event, sel, fleet, stages, artifacts_root, create_pr, llm_factory))
         else:
             outcomes.append(sel.to_outcome(event))
 

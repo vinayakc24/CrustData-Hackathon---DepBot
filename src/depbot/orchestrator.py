@@ -11,6 +11,7 @@ repositories run — that is ``depbot.fleet.runner``.
 
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import importlib
 import json
@@ -34,6 +35,8 @@ from depbot.models import (
 from depbot.package_managers.base import PackageManagerAdapter, PackageManagerError
 from depbot.package_managers.detector import detect_adapter
 from depbot.fleet.versions import UnparseableVersion, compare
+from depbot.llm.base import LLMError
+from depbot.llm.runtime import LLMFactory, use_llm_client
 from depbot.policy.engine import plan_confidence_gate
 from depbot.reporting.pull_request import prepare_pull_request, publish_pull_request
 from depbot.repository.paths import UnsafePath, is_allowed, safe_join
@@ -154,9 +157,16 @@ def _outcome_status(status: JobStatus) -> OutcomeStatus:
 
 
 class RepositoryJobRunner:
-    def __init__(self, job: RepositoryUpgradeJob, stages: PipelineStages, artifacts_root: Path) -> None:
+    def __init__(
+        self,
+        job: RepositoryUpgradeJob,
+        stages: PipelineStages,
+        artifacts_root: Path,
+        llm_factory: LLMFactory | None = None,
+    ) -> None:
         self.job = job
         self.stages = stages
+        self.llm_factory = llm_factory
         self.run_id = new_run_id(job)
         self.artifacts_dir = (artifacts_root / self.run_id).resolve()
         record = job.dependency_record
@@ -190,6 +200,23 @@ class RepositoryJobRunner:
     # -- public ------------------------------------------------------------------
 
     def run(self) -> tuple[DepBotState, RepositoryUpgradeOutcome]:
+        # Each job runs in its own copied context: an LLM client bound here (or by a
+        # stage) can never leak into another job, even under concurrent execution.
+        return contextvars.copy_context().run(self._run_with_llm)
+
+    def _run_with_llm(self) -> tuple[DepBotState, RepositoryUpgradeOutcome]:
+        if self.llm_factory is None:
+            return self._run()  # inherit whatever the caller bound (or nothing)
+        try:
+            client = self.llm_factory()
+        except LLMError as exc:
+            self._fail(JobStatus.BLOCKED, f"LLM client could not be created: {exc}")
+            self._finalize()
+            return self.state, self._outcome(None)
+        with use_llm_client(client):
+            return self._run()
+
+    def _run(self) -> tuple[DepBotState, RepositoryUpgradeOutcome]:
         skipped_reason: str | None = None
         try:
             self._inspect()
@@ -205,6 +232,8 @@ class RepositoryJobRunner:
             self._fail(JobStatus.BLOCKED if exc.blocked else self._stage_failure(), str(exc))
         except UnsafePath as exc:
             self._fail(JobStatus.BLOCKED, f"unsafe path from stage output: {exc}")
+        except LLMError as exc:  # incl. LLMNotConfigured: an explained, not internal, failure
+            self._fail(self._stage_failure(), f"LLM: {exc}")
         except Exception as exc:  # a bug in a stage or in DepBot: fail this job only
             log.exception("job %s crashed", self.run_id)
             self._fail(self._stage_failure(), f"internal error: {type(exc).__name__}: {exc}")
@@ -551,6 +580,11 @@ class RepositoryJobRunner:
 
 
 def run_repository_job(
-    job: RepositoryUpgradeJob, stages: PipelineStages, *, artifacts_root: Path
+    job: RepositoryUpgradeJob,
+    stages: PipelineStages,
+    *,
+    artifacts_root: Path,
+    llm_factory: LLMFactory | None = None,
 ) -> tuple[DepBotState, RepositoryUpgradeOutcome]:
-    return RepositoryJobRunner(job, stages, artifacts_root).run()
+    """Run one job. ``llm_factory`` creates this job's own LLM client (see llm.runtime)."""
+    return RepositoryJobRunner(job, stages, artifacts_root, llm_factory).run()
