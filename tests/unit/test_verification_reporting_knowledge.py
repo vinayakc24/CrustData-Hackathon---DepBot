@@ -29,19 +29,7 @@ from depbot.migration.planner import plan_migration
 from depbot.state import DepBotState, JobStatus
 from depbot.verification.command_runner import MAX_LOG_BYTES, run_command
 from depbot.verification.error_classifier import classify_failure
-from depbot.verification.pipeline import run_verification
 from depbot.verification.repair_engine import propose_repair
-
-
-class _Adapter:
-    def install_args(self, _repo_root, *, build_type="Release"):
-        return [sys.executable, "-c", "print('dependency resolved')"]
-
-    def command_env(self):
-        return {}
-
-    def cmake_preset(self, *, build_type="Release"):
-        return None
 
 
 def _state(tmp_path: Path) -> DepBotState:
