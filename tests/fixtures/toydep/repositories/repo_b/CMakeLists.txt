@@ -1,0 +1,12 @@
+cmake_minimum_required(VERSION 3.20)
+project(toy_repo_b LANGUAGES CXX)
+
+enable_testing()
+set(TOYDEP_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/vendor/toydep")
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/build/dependency/toydep/CMakeLists.txt")
+    set(TOYDEP_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/build/dependency/toydep")
+endif()
+add_subdirectory("${TOYDEP_SOURCE}" "${CMAKE_BINARY_DIR}/toydep")
+add_executable(repo_b_test src/main.cpp)
+target_link_libraries(repo_b_test PRIVATE toydep::toydep)
+add_test(NAME repo_b_test COMMAND repo_b_test)
