@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -29,11 +30,19 @@ from depbot.models import (
     UpgradePolicy,
 )
 from depbot.orchestrator import load_default_stages, run_repository_job
+from depbot.package_managers.conan import CONAN_HOME_ENV
+from depbot.package_managers.conan_setup import SetupError, prepare_local_packages
 from depbot.policy.engine import pre_migration_gate
 
 _GOOD = {OutcomeStatus.VERIFIED, OutcomeStatus.UNAFFECTED, OutcomeStatus.SKIPPED}
 
 log = logging.getLogger("depbot")
+
+
+def _use_conan_home(path: Path) -> None:
+    """Point every DepBot Conan command at an isolated home (explicit env wins)."""
+    if path.is_dir() and CONAN_HOME_ENV not in os.environ:
+        os.environ[CONAN_HOME_ENV] = str(path.resolve())
 
 
 def _load(args: argparse.Namespace) -> tuple[Fleet, Path]:
@@ -42,7 +51,29 @@ def _load(args: argparse.Namespace) -> tuple[Fleet, Path]:
         for pid, policy in fleet.config.policies.items():
             fleet.config.policies[pid] = policy.model_copy(update={"major_approved": True})
     state_dir = state_dir_for(fleet, Path(args.state_dir) if args.state_dir else None)
+    _use_conan_home(state_dir / "conan")
     return fleet, state_dir
+
+
+def cmd_demo_setup(args: argparse.Namespace) -> int:
+    """Build local dependency recipes (e.g. toydep 1.0.0 and 2.0.0) into the fleet's
+    isolated Conan home so `depbot run` works offline without touching ~/.conan2."""
+    fleet = load_fleet(Path(args.fleet))
+    state_dir = state_dir_for(fleet, Path(args.state_dir) if args.state_dir else None)
+    conan_home = state_dir / "conan"
+    try:
+        steps = prepare_local_packages([Path(r) for r in args.recipe], conan_home)
+    except SetupError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    for step in steps:
+        verdict = "ok" if step.succeeded else ("TIMEOUT" if step.timed_out else f"FAILED ({step.exit_code})")
+        print(f"  {step.label:<28} {verdict:<12} {step.duration_seconds:.1f}s")
+        if not step.succeeded:
+            print(step.output_tail, file=sys.stderr)
+    ok = all(s.succeeded for s in steps) and len(steps) == len(args.recipe) + 2
+    print(f"conan home: {conan_home.resolve()}" if ok else "demo setup failed")
+    return 0 if ok else 1
 
 
 def cmd_fleet_status(args: argparse.Namespace) -> int:
@@ -146,6 +177,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             state_dir=state_dir,
             artifacts_root=Path(args.artifacts).resolve(),
             force=args.force,
+            create_pr=args.create_pr,
         )
     except DuplicateEvent as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -171,6 +203,8 @@ def cmd_run(args: argparse.Namespace) -> int:
 def cmd_upgrade(args: argparse.Namespace) -> int:
     """Targeted single-repository upgrade through the same migration engine."""
     root = Path(args.repo).resolve()
+    if args.conan_home:
+        _use_conan_home(Path(args.conan_home))
     repo = RepositoryRecord(repository_id=root.name, repo_url_or_path=str(root), display_name=root.name)
     scan = scan_repository(repo, root)
     if scan.error:
@@ -204,7 +238,7 @@ def cmd_upgrade(args: argparse.Namespace) -> int:
     )
     job = RepositoryUpgradeJob(
         job_id=event.event_id, event=event, repository=repo, dependency_record=record,
-        policy=policy, repo_root=str(root),
+        policy=policy, repo_root=str(root), create_pr=args.create_pr,
     )
     state, outcome = run_repository_job(job, load_default_stages(), artifacts_root=Path(args.artifacts).resolve())
     if args.json:
@@ -241,6 +275,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--approve-major", action="store_true", help="operator approval for major upgrades")
     run.add_argument("--force", action="store_true", help="reprocess an already-processed event")
     run.add_argument("--artifacts", default="artifacts", help="artifacts root (default: ./artifacts)")
+    run.add_argument("--create-pr", action="store_true", help="open GitHub PRs for verified repos")
     run.set_defaults(func=cmd_run)
 
     up = sub.add_parser("upgrade", help="targeted single-repository upgrade")
@@ -251,8 +286,18 @@ def build_parser() -> argparse.ArgumentParser:
     up.add_argument("--upstream-repo", help="explicit upstream repository (owner/name)")
     up.add_argument("--approve-major", action="store_true")
     up.add_argument("--artifacts", default="artifacts")
+    up.add_argument("--conan-home", help="isolated Conan home (e.g. from `depbot demo setup`)")
+    up.add_argument("--create-pr", action="store_true", help="open a GitHub PR if verified")
     up.add_argument("--json", action="store_true")
     up.set_defaults(func=cmd_upgrade)
+
+    demo = sub.add_parser("demo", help="demo helpers").add_subparsers(dest="demo_command", required=True)
+    setup = demo.add_parser("setup", help="build local recipes into the fleet's isolated Conan home")
+    setup.add_argument("--fleet", required=True, help="fleet YAML config")
+    setup.add_argument("--state-dir", help="registry state dir (default: <fleet dir>/.depbot)")
+    setup.add_argument("--recipe", action="append", required=True,
+                       help="Conan recipe directory; repeat for each version")
+    setup.set_defaults(func=cmd_demo_setup)
     return parser
 
 

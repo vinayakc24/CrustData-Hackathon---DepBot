@@ -3,6 +3,7 @@ it is executable Python whose requirements cannot be rewritten safely."""
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 
@@ -21,6 +22,8 @@ _REF = re.compile(
     re.IGNORECASE,
 )
 _DIRECT_SECTIONS = {"requires", "tool_requires", "test_requires"}
+# When set, DepBot uses this isolated Conan home instead of the user's ~/.conan2.
+CONAN_HOME_ENV = "DEPBOT_CONAN_HOME"
 
 
 class ConanAdapter(PackageManagerAdapter):
@@ -115,3 +118,7 @@ class ConanAdapter(PackageManagerAdapter):
     def cmake_preset(self, *, build_type: str = "Release") -> str | None:
         # Requires `[layout] cmake_layout` + CMakeToolchain in conanfile.txt.
         return f"conan-{build_type.lower()}"
+
+    def command_env(self) -> dict[str, str]:
+        home = os.environ.get(CONAN_HOME_ENV)
+        return {"CONAN_HOME": str(Path(home).resolve())} if home else {}

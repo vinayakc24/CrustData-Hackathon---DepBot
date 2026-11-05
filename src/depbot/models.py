@@ -346,6 +346,7 @@ class RepositoryUpgradeJob(_Model):
     dependency_record: RepositoryDependencyRecord
     policy: UpgradePolicy
     repo_root: str  # absolute path of the source checkout (never modified)
+    create_pr: bool = False  # publish to GitHub after the pre-PR gate; local artifact always
 
 
 class RepositoryUpgradeOutcome(_Model):

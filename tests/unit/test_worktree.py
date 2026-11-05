@@ -95,3 +95,17 @@ def test_safe_join_and_allow_list(tmp_path):
     assert is_allowed("conanfile.txt", ["src", "conanfile.txt"])
     assert not is_allowed("srcx/main.cpp", ["src"])
     assert not is_allowed("CMakeLists.txt", [])
+
+
+def test_git_root_is_cloned_sharing_history_without_remote(source, tmp_path):
+    wc = prepare_working_copy(source, tmp_path / "wt", branch="depbot/x")
+    assert wc.mode == "clone" and wc.baseline_commit == wc.source_commit
+    assert wc.source_branch in ("master", "main")
+    remotes = subprocess.run(["git", "remote"], cwd=tmp_path / "wt", capture_output=True, text=True).stdout
+    assert remotes.strip() == ""  # cannot push back into the source by accident
+
+
+def test_subdirectory_of_repo_uses_snapshot(source, tmp_path):
+    wc = prepare_working_copy(source / "src", tmp_path / "wt", branch="depbot/x")
+    assert wc.mode == "snapshot" and wc.version_controlled
+    assert (tmp_path / "wt" / "main.cpp").is_file()
