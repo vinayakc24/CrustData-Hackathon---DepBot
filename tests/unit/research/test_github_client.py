@@ -11,6 +11,7 @@ from depbot.research.github_client import (
     GitHubRelease,
     GitHubReleaseError,
     find_github_release,
+    get_latest_github_release,
 )
 
 
@@ -59,6 +60,7 @@ def _release(tag: str, **updates) -> dict:
         "html_url": f"https://github.com/acme/widget/releases/tag/{tag}",
         "published_at": "2026-10-01T12:00:00Z",
         "prerelease": "-" in tag,
+        "draft": False,
     }
     return item | updates
 
@@ -173,3 +175,63 @@ def test_response_limit_is_enforced_during_read(monkeypatch) -> None:
     with pytest.raises(GitHubReleaseError, match="byte limit"):
         find_github_release(upstream_repo="acme/widget", target_version="2.0.0", max_response_bytes=10)
     assert response.bytes_read == 11
+
+
+def test_latest_release_uses_bounded_latest_endpoint_and_preserves_fields(monkeypatch) -> None:
+    item = _release("v3.0.0") | {"body": "Latest\r\nnotes", "html_url": "https://github.com/acme/widget/releases/tag/v3.0.0"}
+    opener = FakeOpener([Response(json.dumps(item).encode("utf-8"))])
+    _mock(monkeypatch, opener)
+
+    release = get_latest_github_release(upstream_repo="https://github.com/acme/widget.git", timeout_seconds=3)
+
+    assert release == GitHubRelease(
+        "v3.0.0", "Release v3.0.0", "Latest\r\nnotes",
+        "https://github.com/acme/widget/releases/tag/v3.0.0", "2026-10-01T12:00:00Z", False,
+    )
+    assert opener.requests[0].full_url == "https://api.github.com/repos/acme/widget/releases/latest"
+    assert opener.timeouts == [3]
+
+
+@pytest.mark.parametrize("updates, message", [
+    ({"prerelease": True}, "prerelease"),
+    ({"draft": True}, "draft"),
+    ({"draft": None}, "draft flag"),
+])
+def test_latest_release_rejects_prereleases_and_drafts(monkeypatch, updates, message: str) -> None:
+    _mock(monkeypatch, FakeOpener([Response(json.dumps(_release("v2.0.0") | updates).encode())]))
+
+    with pytest.raises(GitHubReleaseError, match=message):
+        get_latest_github_release(upstream_repo="acme/widget")
+
+
+def test_latest_release_rejects_invalid_repositories_and_bounded_payloads(monkeypatch) -> None:
+    with pytest.raises(GitHubReleaseError):
+        get_latest_github_release(upstream_repo="https://evil.example/acme/widget")
+
+    response = CountingResponse(json.dumps(_release("v2.0.0")).encode() + b" " * 100)
+    _mock(monkeypatch, FakeOpener([response]))
+    with pytest.raises(GitHubReleaseError, match="byte limit"):
+        get_latest_github_release(upstream_repo="acme/widget", max_response_bytes=10)
+    assert response.bytes_read == 11
+
+
+@pytest.mark.parametrize("error", [
+    urllib.error.HTTPError("https://api.github.com", 404, "missing", {}, None),
+    urllib.error.HTTPError("https://api.github.com", 403, "rate", {"X-RateLimit-Remaining": "0"}, None),
+    urllib.error.HTTPError("https://api.github.com", 429, "rate", {}, None),
+    urllib.error.URLError("network unavailable"),
+    TimeoutError("timed out"),
+])
+def test_latest_release_reports_http_rate_network_and_timeout_errors(monkeypatch, error: Exception) -> None:
+    _mock(monkeypatch, FakeOpener(error=error))
+
+    with pytest.raises(GitHubReleaseError):
+        get_latest_github_release(upstream_repo="acme/widget")
+
+
+@pytest.mark.parametrize("body", [b"not json", b"[]", b"\xff"])
+def test_latest_release_rejects_malformed_json_or_shape(monkeypatch, body: bytes) -> None:
+    _mock(monkeypatch, FakeOpener([Response(body)]))
+
+    with pytest.raises(GitHubReleaseError):
+        get_latest_github_release(upstream_repo="acme/widget")
