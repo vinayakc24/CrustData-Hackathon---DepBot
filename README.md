@@ -31,13 +31,13 @@ that depend on the local toy library `toydep`:
 | `repo_b` | `old_sum` at another call site, toydep 1.0.0 | migrated + verified |
 | `repo_c` | already on toydep 2.0.0 | skipped, no job/LLM/build |
 
-toydep 2.0.0 removes `old_sum` in favour of `sum` (see its `CHANGELOG.md`).
+toydep 2.0.0 removes `old_sum` in favour of `sum` (see `tests/fixtures/toydep/release-notes-2.0.0.md`).
 
 ```bash
 # 1. Build toydep 1.0.0 and 2.0.0 into an isolated, offline Conan home
 #    (examples/.depbot/conan; your ~/.conan2 is never touched)
 depbot demo setup --fleet examples/demo-fleet.yaml \
-  --recipe tests/fixtures/toydep/1.0.0 --recipe tests/fixtures/toydep/2.0.0
+  --recipe tests/fixtures/toydep/v1 --recipe tests/fixtures/toydep/v2
 
 # 2. Inspect the registered fleet and its dependency inventory
 depbot fleet status --fleet examples/demo-fleet.yaml
@@ -120,8 +120,8 @@ reported as a duplicate. A failing watch or fleet run doesn't stop the others. `
 ### Single-repository fallback
 
 ```bash
-depbot upgrade --repo tests/fixtures/repos/repo_a --dependency toydep --to 2.0.0 \
-  --changelog tests/fixtures/toydep/2.0.0/CHANGELOG.md \
+depbot upgrade --repo tests/fixtures/toydep/repositories/repo_a --dependency toydep --to 2.0.0 \
+  --changelog tests/fixtures/toydep/release-notes-2.0.0.md \
   --conan-home examples/.depbot/conan --approve-major
 ```
 
