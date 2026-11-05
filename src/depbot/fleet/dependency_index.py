@@ -32,7 +32,7 @@ class RepositoryScan(BaseModel):
 def _manifest_digest(root: Path) -> str | None:
     digest = hashlib.sha256()
     found = False
-    for name in ("conanfile.txt", "conanfile.py", "vcpkg.json"):
+    for name in ("conanfile.txt", "conanfile.py", "vcpkg.json", "vcpkg-configuration.json"):
         path = root / name
         if path.is_file():
             found = True

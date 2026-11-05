@@ -1,4 +1,4 @@
-# DepBot Contract Handoff — v0.2.0
+# DepBot Contract Handoff — v0.3.0
 
 Owner: **Member A**. These contracts are frozen for the first end-to-end demo.
 B and C implement against them; if you need a change, propose it to A (field,
@@ -88,8 +88,31 @@ adapter.install_args(worktree, build_type="Release")
 adapter.cmake_preset(build_type="Release")  # -> "conan-release"
 ```
 
-C's verification runs `install_args`, then `cmake --preset <preset>`,
-`cmake --build --preset <preset>`, `ctest --preset <preset> --output-on-failure`.
+`detect_adapter` returns `ConanAdapter` (`conanfile.txt`) or `VcpkgAdapter` (`vcpkg.json`,
+manifest mode). Both expose the same methods. C's verification must work for either:
+
+```python
+env = minimal_env(adapter.command_env())
+install = adapter.install_args(worktree, build_type=bt)            # run first
+preset = adapter.cmake_preset(build_type=bt)
+if preset:   # Conan
+    configure = ["cmake", "--preset", preset]
+    build     = ["cmake", "--build", "--preset", preset]
+    test      = ["ctest", "--preset", preset, "--output-on-failure"]
+else:        # vcpkg
+    configure = ["cmake", "-S", ".", "-B", "build", *adapter.cmake_configure_args(worktree, build_type=bt)]
+    build     = ["cmake", "--build", "build", "--config", bt]
+    test      = ["ctest", "--test-dir", "build", "-C", bt, "--output-on-failure"]
+```
+
+- `adapter.environment_problems()` is checked by the engine before any edit (missing
+  `conan`, or missing `VCPKG_ROOT` / `vcpkg.cmake` / `vcpkg` executable → job BLOCKED).
+- vcpkg installs into `<worktree>/vcpkg_installed/` (git-excluded, never counted as a change).
+- vcpkg rules: only the target's `version>=` and/or `overrides` entry change (byte-minimal edit);
+  `builtin-baseline` is never edited; a dependency with no `version>=` and no override is refused
+  (reported as `unpinned(builtin-baseline)` → selection `needs_rescan` / BLOCKED). Whether the
+  target resolves is proven only by the install step.
+
 Do not parse or edit manifests directly; ask A for a new adapter method.
 
 ## 5. Fixture agreement (C owns `tests/fixtures/**`)
@@ -163,6 +186,9 @@ A stage that isn't importable yet makes the job BLOCKED with
 
 ## 7. Change log
 
+- 0.3.0 — additive: `VcpkgAdapter` (manifest mode); `PackageManagerAdapter.cmake_configure_args()`
+  and `.environment_problems()` (defaults `[]`, so Conan behaviour is unchanged). The engine now blocks
+  a job before any edit if the package-manager tooling is unavailable.
 - 0.2.0 — additive only, nothing existing changed:
   `PipelineStages.repair` (optional `RepairStage`); `RepositoryUpgradeJob.create_pr: bool = False`;
   `PackageManagerAdapter.command_env()` + `minimal_env()`; working copies of Git-root repos are now

@@ -232,6 +232,9 @@ class RepositoryJobRunner:
             declared = self.adapter.find_dependency(self.worktree, self.state.dependency.name)
         except PackageManagerError as exc:
             raise StageError(f"package manager: {exc}", blocked=True) from exc
+        problems = self.adapter.environment_problems()
+        if problems:
+            raise StageError(f"{self.adapter.name.value} tooling: " + "; ".join(problems), blocked=True)
         # The index is only a candidate filter: revalidate against the fresh copy.
         try:
             if compare(declared.version, self.state.dependency.target_version) >= 0:
