@@ -1,4 +1,4 @@
-# DepBot Contract Handoff — v0.1.0
+# DepBot Contract Handoff — v0.4.0
 
 Owner: **Member A**. These contracts are frozen for the first end-to-end demo.
 B and C implement against them; if you need a change, propose it to A (field,
@@ -88,8 +88,31 @@ adapter.install_args(worktree, build_type="Release")
 adapter.cmake_preset(build_type="Release")  # -> "conan-release"
 ```
 
-C's verification runs `install_args`, then `cmake --preset <preset>`,
-`cmake --build --preset <preset>`, `ctest --preset <preset> --output-on-failure`.
+`detect_adapter` returns `ConanAdapter` (`conanfile.txt`) or `VcpkgAdapter` (`vcpkg.json`,
+manifest mode). Both expose the same methods. C's verification must work for either:
+
+```python
+env = minimal_env(adapter.command_env())
+install = adapter.install_args(worktree, build_type=bt)            # run first
+preset = adapter.cmake_preset(build_type=bt)
+if preset:   # Conan
+    configure = ["cmake", "--preset", preset]
+    build     = ["cmake", "--build", "--preset", preset]
+    test      = ["ctest", "--preset", preset, "--output-on-failure"]
+else:        # vcpkg
+    configure = ["cmake", "-S", ".", "-B", "build", *adapter.cmake_configure_args(worktree, build_type=bt)]
+    build     = ["cmake", "--build", "build", "--config", bt]
+    test      = ["ctest", "--test-dir", "build", "-C", bt, "--output-on-failure"]
+```
+
+- `adapter.environment_problems()` is checked by the engine before any edit (missing
+  `conan`, or missing `VCPKG_ROOT` / `vcpkg.cmake` / `vcpkg` executable → job BLOCKED).
+- vcpkg installs into `<worktree>/vcpkg_installed/` (git-excluded, never counted as a change).
+- vcpkg rules: only the target's `version>=` and/or `overrides` entry change (byte-minimal edit);
+  `builtin-baseline` is never edited; a dependency with no `version>=` and no override is refused
+  (reported as `unpinned(builtin-baseline)` → selection `needs_rescan` / BLOCKED). Whether the
+  target resolves is proven only by the install step.
+
 Do not parse or edit manifests directly; ask A for a new adapter method.
 
 ## 5. Fixture agreement (C owns `tests/fixtures/**`)
@@ -132,16 +155,86 @@ For each eligible repository the engine:
 Notes for C:
 - Baseline and upgraded verification run in the **same** worktree. Delete or
   re-create `build/` between phases (`build/` and `CMakeUserPresets.json` are git-excluded).
+- **Run every install/configure/build/test command with
+  `env=minimal_env(adapter.command_env())`** (`from depbot.package_managers.base import minimal_env`).
+  This passes the isolated `CONAN_HOME` created by `depbot demo setup` and keeps tokens and API keys
+  out of builds. Verified: with that env, `adapter.install_args()` resolves toydep offline.
 - `depbot.repository.paths.safe_join(root, rel)` and `is_allowed(rel, allowed)` are
   available for the patch validator. Prefer them over re-implementing path checks.
-- Repair is not wired in yet. When C's repair engine is ready, A will add an
-  optional `repair` stage to `PipelineStages` (v0.2).
+
+### Repair stage (v0.2, optional) — C implements, A wires
+
+`depbot.verification.repair_engine.propose_repair(*, worktree, state, failure, attempt) -> list[SourcePatch]`
+
+- Called only after an upgraded FAILED_BUILD / FAILED_TESTS while `repair_attempts < max_repair_attempts`.
+- `failure` is the failing `VerificationResult`; set its `failure_category` from your error classifier.
+- Return targeted patches, or `[]` to give up. Do not run commands. The engine applies them through
+  `validate_and_apply` (same scope rules), then re-runs the full upgraded verification.
+- A patch whose diff was already applied is refused. Every repair patch is saved under `patches/`.
+- If the module doesn't exist, repair is simply disabled; the job is not blocked.
+
+### Delivery (A)
+
+After VERIFIED or NO_CHANGES_NEEDED the engine writes `pr/pr-body.md` and `pr/pr.json` (local PR
+artifact, built only from recorded evidence) when the pre-PR gate allows. With `create_pr=True`
+it pushes the branch to the source's GitHub `origin` and runs `gh pr create` (no merge).
+C's `write_repository_report` runs after this, so `state.pr_url` / `state.repo_facts["pull_request"]`
+are available to the report.
 
 A stage that isn't importable yet makes the job BLOCKED with
 `stage '<name>' not integrated yet` — no fake success.
 
+## 8. LLM runtime — `depbot.llm.runtime` (A owns; B and C consume)
+
+Stage signatures stay frozen. A stage gets the current job's client from the runtime:
+
+```python
+from depbot.llm.base import UNTRUSTED_CONTENT_NOTICE, LLMError, wrap_untrusted
+from depbot.llm.runtime import LLMNotConfigured, get_llm_client, current_llm_client
+
+try:
+    client = get_llm_client()                  # raises LLMNotConfigured if none is bound
+except LLMNotConfigured:
+    ...                                        # deterministic fallback, or StageError(..., blocked=True)
+
+result = client.complete_structured(
+    task="breaking_changes",                   # stable label; also the fixture key
+    system=PROMPT + "\n" + UNTRUSTED_CONTENT_NOTICE,
+    user=wrap_untrusted(changelog_excerpt),
+    schema=MyPydanticModel,                    # response is validated, or LLMError is raised
+)
+```
+
+- **Scoping:** the engine runs every repository job in a copied `contextvars` context and binds a
+  fresh client from the run's factory, so clients never leak between jobs. `current_llm_client()`
+  returns the client or `None`, for optional LLM use.
+- **No client configured:** `get_llm_client()` raises `LLMNotConfigured` (a subclass of `LLMError`).
+  If a stage lets any `LLMError` escape, the job fails with reason `LLM: …`, not as an internal error.
+- **Tests:** `with use_llm_client(FixtureLLMClient({"breaking_changes": {...}})): ...`
+- **Demo / CLI:** `--llm fixture --llm-fixtures path.json` (a `{task: response}` JSON file); each job
+  gets its own `FixtureLLMClient`. The task labels and response shapes are B's (and C's) to define and
+  document; the fixture file belongs next to the demo config.
+- **Production:** `--llm anthropic [--llm-model M]` uses `depbot.llm.provider.AnthropicLLMClient`
+  (stdlib HTTP, key from `LLM_API_KEY` or `ANTHROPIC_API_KEY`, model from `--llm-model` or
+  `$DEPBOT_LLM_MODEL`, default `claude-sonnet-5-5`). The CLI fails fast if no key is set. No tools are
+  offered to the model, and responses must be one JSON document matching the schema.
+- **Default:** `--llm none` (or `$DEPBOT_LLM`). The deterministic demo must work in this mode or with fixtures.
+- `depbot.llm.runtime` imports only `depbot.llm.base`.
+
 ## 7. Change log
 
+- 0.4.0 — additive: `depbot.llm.runtime` (`get_llm_client`, `current_llm_client`, `use_llm_client`,
+  `LLMNotConfigured`, `fixture_factory`), production provider `depbot.llm.provider.AnthropicLLMClient`,
+  CLI `--llm/--llm-fixtures/--llm-model`, and `run_repository_job(..., llm_factory=)` /
+  `run_fleet(..., llm_factory=)`. Stage signatures unchanged.
+- 0.3.0 — additive: `VcpkgAdapter` (manifest mode); `PackageManagerAdapter.cmake_configure_args()`
+  and `.environment_problems()` (defaults `[]`, so Conan behaviour is unchanged). The engine now blocks
+  a job before any edit if the package-manager tooling is unavailable.
+- 0.2.0 — additive only, nothing existing changed:
+  `PipelineStages.repair` (optional `RepairStage`); `RepositoryUpgradeJob.create_pr: bool = False`;
+  `PackageManagerAdapter.command_env()` + `minimal_env()`; working copies of Git-root repos are now
+  local clones sharing the source history (`repo_facts["working_copy"]["mode"] == "clone"`), with
+  subdirectory fixtures still snapshot-copied.
 - 0.1.1 — added `RESEARCHED → FAILED_MIGRATION`; documented engine call order, worktree layout,
   path helpers. `depbot run` / `depbot upgrade` available. No field changes.
 - 0.1.0 — initial contracts (Member A).

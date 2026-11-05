@@ -8,6 +8,7 @@ verification command runner executes with timeouts (shell=False).
 from __future__ import annotations
 
 import difflib
+import os
 from abc import ABC, abstractmethod
 from pathlib import Path
 
@@ -79,6 +80,31 @@ class PackageManagerAdapter(ABC):
     @abstractmethod
     def cmake_preset(self, *, build_type: str = "Release") -> str | None:
         """CMake configure/build/test preset produced by install, if any."""
+
+    def command_env(self) -> dict[str, str]:
+        """Extra environment variables every install/configure/build/test command
+        must receive (e.g. an isolated CONAN_HOME). Merge into ``minimal_env()``."""
+        return {}
+
+    def cmake_configure_args(self, repo_root: Path, *, build_type: str = "Release") -> list[str]:
+        """Extra ``cmake`` configure arguments when ``cmake_preset()`` is None
+        (e.g. the vcpkg toolchain file). Empty when the preset carries everything."""
+        return []
+
+    def environment_problems(self) -> list[str]:
+        """Tooling problems that make install/build impossible (checked before any edit)."""
+        return []
+
+
+# Only these variables reach repository builds/tests: never tokens or API keys.
+_PASSTHROUGH_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "CC", "CXX", "CMAKE_GENERATOR")
+
+
+def minimal_env(extra: dict[str, str] | None = None) -> dict[str, str]:
+    """Allow-listed environment for subprocesses that run repository code."""
+    env = {k: v for k in _PASSTHROUGH_ENV if (v := os.environ.get(k)) is not None}
+    env.update(extra or {})
+    return env
 
 
 def unified_diff(rel_path: str, before: str, after: str) -> str:

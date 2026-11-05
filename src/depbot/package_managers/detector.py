@@ -6,8 +6,9 @@ from pathlib import Path
 
 from depbot.package_managers.base import PackageManagerAdapter, UnsupportedManifest
 from depbot.package_managers.conan import ConanAdapter
+from depbot.package_managers.vcpkg import VcpkgAdapter
 
-ADAPTERS: tuple[type[PackageManagerAdapter], ...] = (ConanAdapter,)
+ADAPTERS: tuple[type[PackageManagerAdapter], ...] = (ConanAdapter, VcpkgAdapter)
 
 
 def detect_adapter(repo_root: Path) -> PackageManagerAdapter:
@@ -18,9 +19,6 @@ def detect_adapter(repo_root: Path) -> PackageManagerAdapter:
         )
     if found:
         return found[0]()
-    if (repo_root / "vcpkg.json").is_file():
-        # Not faked: vcpkg support is not implemented yet (plan.md §16 item 3).
-        raise UnsupportedManifest("vcpkg.json detected; vcpkg adapter is not implemented yet")
     if (repo_root / "conanfile.py").is_file():
         raise UnsupportedManifest("conanfile.py is executable; only conanfile.txt is supported")
     raise UnsupportedManifest(f"no supported package manifest in {repo_root}")

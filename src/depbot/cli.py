@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -28,12 +29,23 @@ from depbot.models import (
     RepositoryUpgradeJob,
     UpgradePolicy,
 )
+from depbot.llm.base import LLMError
+from depbot.llm.provider import AnthropicLLMClient
+from depbot.llm.runtime import LLMFactory, fixture_factory
 from depbot.orchestrator import load_default_stages, run_repository_job
+from depbot.package_managers.conan import CONAN_HOME_ENV
+from depbot.package_managers.conan_setup import SetupError, prepare_local_packages
 from depbot.policy.engine import pre_migration_gate
 
 _GOOD = {OutcomeStatus.VERIFIED, OutcomeStatus.UNAFFECTED, OutcomeStatus.SKIPPED}
 
 log = logging.getLogger("depbot")
+
+
+def _use_conan_home(path: Path) -> None:
+    """Point every DepBot Conan command at an isolated home (explicit env wins)."""
+    if path.is_dir() and CONAN_HOME_ENV not in os.environ:
+        os.environ[CONAN_HOME_ENV] = str(path.resolve())
 
 
 def _load(args: argparse.Namespace) -> tuple[Fleet, Path]:
@@ -42,7 +54,29 @@ def _load(args: argparse.Namespace) -> tuple[Fleet, Path]:
         for pid, policy in fleet.config.policies.items():
             fleet.config.policies[pid] = policy.model_copy(update={"major_approved": True})
     state_dir = state_dir_for(fleet, Path(args.state_dir) if args.state_dir else None)
+    _use_conan_home(state_dir / "conan")
     return fleet, state_dir
+
+
+def cmd_demo_setup(args: argparse.Namespace) -> int:
+    """Build local dependency recipes (e.g. toydep 1.0.0 and 2.0.0) into the fleet's
+    isolated Conan home so `depbot run` works offline without touching ~/.conan2."""
+    fleet = load_fleet(Path(args.fleet))
+    state_dir = state_dir_for(fleet, Path(args.state_dir) if args.state_dir else None)
+    conan_home = state_dir / "conan"
+    try:
+        steps = prepare_local_packages([Path(r) for r in args.recipe], conan_home)
+    except SetupError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    for step in steps:
+        verdict = "ok" if step.succeeded else ("TIMEOUT" if step.timed_out else f"FAILED ({step.exit_code})")
+        print(f"  {step.label:<28} {verdict:<12} {step.duration_seconds:.1f}s")
+        if not step.succeeded:
+            print(step.output_tail, file=sys.stderr)
+    ok = all(s.succeeded for s in steps) and len(steps) == len(args.recipe) + 2
+    print(f"conan home: {conan_home.resolve()}" if ok else "demo setup failed")
+    return 0 if ok else 1
 
 
 def cmd_fleet_status(args: argparse.Namespace) -> int:
@@ -134,10 +168,36 @@ def cmd_fleet_plan(args: argparse.Namespace) -> int:
     return 0
 
 
+LLM_MODES = ("none", "fixture", "anthropic")
+
+
+def _llm_factory(args: argparse.Namespace) -> LLMFactory | None:
+    """Build the per-job LLM client factory from --llm (or $DEPBOT_LLM). Validated up front."""
+    mode = args.llm or os.environ.get("DEPBOT_LLM") or "none"
+    if mode not in LLM_MODES:
+        raise LLMError(f"unknown LLM mode {mode!r}; choose one of {', '.join(LLM_MODES)}")
+    if mode == "none":
+        return None
+    if mode == "fixture":
+        if not args.llm_fixtures:
+            raise LLMError("--llm fixture requires --llm-fixtures PATH")
+        return fixture_factory(Path(args.llm_fixtures))
+    AnthropicLLMClient.from_env(model=args.llm_model)  # fail fast if no key
+    return lambda: AnthropicLLMClient.from_env(model=args.llm_model)
+
+
+def _add_llm_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--llm", choices=LLM_MODES,
+                        help="LLM provider for bounded stages (default: $DEPBOT_LLM or none)")
+    parser.add_argument("--llm-fixtures", help="JSON {task: response} file for --llm fixture")
+    parser.add_argument("--llm-model", help="model for --llm anthropic (default: $DEPBOT_LLM_MODEL)")
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     """Process one release event across the fleet. Exit 0 only if no job failed/blocked."""
     fleet, state_dir = _load(args)
     event = load_event(Path(args.event))
+    llm_factory = _llm_factory(args)
     try:
         summary = run_fleet(
             event,
@@ -146,6 +206,8 @@ def cmd_run(args: argparse.Namespace) -> int:
             state_dir=state_dir,
             artifacts_root=Path(args.artifacts).resolve(),
             force=args.force,
+            create_pr=args.create_pr,
+            llm_factory=llm_factory,
         )
     except DuplicateEvent as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -171,6 +233,8 @@ def cmd_run(args: argparse.Namespace) -> int:
 def cmd_upgrade(args: argparse.Namespace) -> int:
     """Targeted single-repository upgrade through the same migration engine."""
     root = Path(args.repo).resolve()
+    if args.conan_home:
+        _use_conan_home(Path(args.conan_home))
     repo = RepositoryRecord(repository_id=root.name, repo_url_or_path=str(root), display_name=root.name)
     scan = scan_repository(repo, root)
     if scan.error:
@@ -204,9 +268,12 @@ def cmd_upgrade(args: argparse.Namespace) -> int:
     )
     job = RepositoryUpgradeJob(
         job_id=event.event_id, event=event, repository=repo, dependency_record=record,
-        policy=policy, repo_root=str(root),
+        policy=policy, repo_root=str(root), create_pr=args.create_pr,
     )
-    state, outcome = run_repository_job(job, load_default_stages(), artifacts_root=Path(args.artifacts).resolve())
+    state, outcome = run_repository_job(
+        job, load_default_stages(), artifacts_root=Path(args.artifacts).resolve(),
+        llm_factory=_llm_factory(args),
+    )
     if args.json:
         print(outcome.model_dump_json(indent=2))
     else:
@@ -241,6 +308,8 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--approve-major", action="store_true", help="operator approval for major upgrades")
     run.add_argument("--force", action="store_true", help="reprocess an already-processed event")
     run.add_argument("--artifacts", default="artifacts", help="artifacts root (default: ./artifacts)")
+    run.add_argument("--create-pr", action="store_true", help="open GitHub PRs for verified repos")
+    _add_llm_args(run)
     run.set_defaults(func=cmd_run)
 
     up = sub.add_parser("upgrade", help="targeted single-repository upgrade")
@@ -251,8 +320,19 @@ def build_parser() -> argparse.ArgumentParser:
     up.add_argument("--upstream-repo", help="explicit upstream repository (owner/name)")
     up.add_argument("--approve-major", action="store_true")
     up.add_argument("--artifacts", default="artifacts")
+    up.add_argument("--conan-home", help="isolated Conan home (e.g. from `depbot demo setup`)")
+    up.add_argument("--create-pr", action="store_true", help="open a GitHub PR if verified")
     up.add_argument("--json", action="store_true")
+    _add_llm_args(up)
     up.set_defaults(func=cmd_upgrade)
+
+    demo = sub.add_parser("demo", help="demo helpers").add_subparsers(dest="demo_command", required=True)
+    setup = demo.add_parser("setup", help="build local recipes into the fleet's isolated Conan home")
+    setup.add_argument("--fleet", required=True, help="fleet YAML config")
+    setup.add_argument("--state-dir", help="registry state dir (default: <fleet dir>/.depbot)")
+    setup.add_argument("--recipe", action="append", required=True,
+                       help="Conan recipe directory; repeat for each version")
+    setup.set_defaults(func=cmd_demo_setup)
     return parser
 
 
@@ -264,7 +344,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     try:
         return args.func(args)
-    except RegistryError as exc:
+    except (RegistryError, LLMError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 

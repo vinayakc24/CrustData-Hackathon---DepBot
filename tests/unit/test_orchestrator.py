@@ -201,7 +201,93 @@ def test_revalidation_skips_repo_already_upgraded_since_indexing(job, tmp_path):
 
 
 def test_unintegrated_stages_block_honestly(job, tmp_path):
-    stages = load_default_stages()
+    from depbot.orchestrator import _not_integrated
+    stages = _stages(research=_not_integrated("research", "depbot.research.x.research_release"))
     state, outcome = run_repository_job(job, stages, artifacts_root=tmp_path / "a")
     assert outcome.status == OutcomeStatus.BLOCKED
-    assert "not integrated yet" in state.status_reason
+    assert "stage 'research' not integrated yet" in state.status_reason
+
+
+def test_default_stages_resolve_integrated_modules():
+    stages = load_default_stages()
+    assert stages.verify.__module__ == "depbot.verification.pipeline"
+    assert stages.plan.__module__ == "depbot.migration.planner"
+    assert stages.impact.__module__ == "depbot.code_intelligence.impact_analyzer"
+    assert stages.repair is not None
+
+
+# ----------------------------------------------------------------- repair loop
+
+NOOP_DIFF = """\
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -1,2 +1,3 @@
+ #include <toydep/toydep.h>
++// repaired
+ int main() { return sum(2, 3) == 5 ? 0 : 1; }
+"""
+
+
+def _fails_until(n_good_after):
+    """Upgraded verification fails to build until `n_good_after` repairs were applied."""
+    calls = {"upgraded": 0}
+
+    def verify(phase, **kw):
+        if phase == "baseline":
+            return _passing(phase)
+        calls["upgraded"] += 1
+        if calls["upgraded"] > n_good_after:
+            return _passing(phase)
+        return VerificationResult(phase=phase, dependency_install=_ok("install"),
+                                  configure=_ok("configure"), build=_ok("build", code=2),
+                                  failure_category="removed_symbol")
+    return verify, calls
+
+
+def test_repair_fixes_build_then_verifies(job, tmp_path):
+    verify, calls = _fails_until(1)
+    seen = []
+
+    def repair(*, worktree, state, failure, attempt):
+        seen.append((attempt, failure.failure_category, state.status))
+        return [SourcePatch(patch_id=f"r{attempt}", unified_diff=NOOP_DIFF, files=["src/main.cpp"])]
+
+    state, outcome = run_repository_job(job, _stages(verify=verify, repair=repair), artifacts_root=tmp_path / "a")
+    assert state.status == JobStatus.VERIFIED and outcome.status == OutcomeStatus.VERIFIED
+    assert seen == [(1, "removed_symbol", JobStatus.FAILED_BUILD)]
+    assert state.repair_attempts == 1 and calls["upgraded"] == 2
+    assert "// repaired" in (tmp_path / "a" / state.run_id / "worktree" / "src" / "main.cpp").read_text()
+    assert (tmp_path / "a" / state.run_id / "patches" / "r1.diff").is_file()
+
+
+def test_repair_loop_stops_at_policy_limit(job, tmp_path):
+    verify, calls = _fails_until(99)
+    counter = {"n": 0}
+
+    def repair(**kw):
+        counter["n"] += 1
+        body = NOOP_DIFF.replace("// repaired", f"// repaired {counter['n']}")
+        if counter["n"] > 1:  # second repair edits on top of the first
+            body = body.replace(" int main", f" // repaired {counter['n'] - 1}\n int main", 1)
+            body = body.replace("@@ -1,2 +1,3 @@", "@@ -1,3 +1,4 @@")
+        return [SourcePatch(patch_id=f"r{counter['n']}", unified_diff=body, files=["src/main.cpp"])]
+
+    job2 = job.model_copy(update={"policy": job.policy.model_copy(update={"max_repair_attempts": 2})})
+    state, outcome = run_repository_job(job2, _stages(verify=verify, repair=repair), artifacts_root=tmp_path / "a")
+    assert state.status == JobStatus.FAILED_BUILD and outcome.status == OutcomeStatus.FAILED
+    assert state.repair_attempts == 2 and counter["n"] == 2 and calls["upgraded"] == 3
+    assert "repair limit 2 reached" in state.status_reason
+
+
+def test_identical_repair_patch_is_not_retried(job, tmp_path):
+    verify, _ = _fails_until(99)
+    repair = lambda **kw: [SourcePatch(patch_id="same", unified_diff=DIFF, files=["src/main.cpp"])]
+    state, _ = run_repository_job(job, _stages(verify=verify, repair=repair), artifacts_root=tmp_path / "a")
+    assert state.status == JobStatus.FAILED_MIGRATION and "repeats an already-applied diff" in state.status_reason
+
+
+def test_repair_giving_up_keeps_failure(job, tmp_path):
+    verify, _ = _fails_until(99)
+    state, _ = run_repository_job(job, _stages(verify=verify, repair=lambda **kw: []), artifacts_root=tmp_path / "a")
+    assert state.status == JobStatus.FAILED_BUILD and "no repair proposed" in state.status_reason
+    assert state.repair_attempts == 0

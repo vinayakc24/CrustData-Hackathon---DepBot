@@ -11,6 +11,8 @@ repositories run — that is ``depbot.fleet.runner``.
 
 from __future__ import annotations
 
+import contextvars
+import hashlib
 import importlib
 import json
 import logging
@@ -26,13 +28,17 @@ from depbot.models import (
     PatchStatus,
     RepositoryUpgradeJob,
     RepositoryUpgradeOutcome,
+    SourcePatch,
     VerificationPhase,
     VerificationResult,
 )
 from depbot.package_managers.base import PackageManagerAdapter, PackageManagerError
 from depbot.package_managers.detector import detect_adapter
 from depbot.fleet.versions import UnparseableVersion, compare
+from depbot.llm.base import LLMError
+from depbot.llm.runtime import LLMFactory, use_llm_client
 from depbot.policy.engine import plan_confidence_gate
+from depbot.reporting.pull_request import prepare_pull_request, publish_pull_request
 from depbot.repository.paths import UnsafePath, is_allowed, safe_join
 from depbot.repository.worktree import (
     UnsafeRepository,
@@ -71,15 +77,30 @@ def _not_integrated(stage: str, target: str):
     return _stage
 
 
+_OPTIONAL_STAGE_TARGETS = {
+    "repair": "depbot.verification.repair_engine:propose_repair",
+}
+
+
+def _import(target: str):
+    module_name, func_name = target.split(":")
+    return getattr(importlib.import_module(module_name), func_name)
+
+
 def load_default_stages() -> PipelineStages:
-    """Resolve B's and C's stage functions; missing ones block jobs honestly."""
+    """Resolve B's and C's stage functions; missing ones block jobs honestly.
+    Missing optional stages (repair) simply disable that behaviour."""
     resolved = {}
     for stage, target in _STAGE_TARGETS.items():
-        module_name, func_name = target.split(":")
         try:
-            resolved[stage] = getattr(importlib.import_module(module_name), func_name)
+            resolved[stage] = _import(target)
         except (ImportError, AttributeError):
             resolved[stage] = _not_integrated(stage, target.replace(":", "."))
+    for stage, target in _OPTIONAL_STAGE_TARGETS.items():
+        try:
+            resolved[stage] = _import(target)
+        except (ImportError, AttributeError):
+            resolved[stage] = None
     return PipelineStages(**resolved)
 
 
@@ -122,7 +143,8 @@ def _verification_failure(result: VerificationResult, require_tests: bool) -> tu
 
 
 def _outcome_status(status: JobStatus) -> OutcomeStatus:
-    if status in (JobStatus.VERIFIED, JobStatus.PR_CREATED):
+    # FAILED_PR: the upgrade itself verified; only GitHub delivery failed (reason says so).
+    if status in (JobStatus.VERIFIED, JobStatus.PR_CREATED, JobStatus.FAILED_PR):
         return OutcomeStatus.VERIFIED
     if status == JobStatus.NO_CHANGES_NEEDED:
         return OutcomeStatus.UNAFFECTED
@@ -135,9 +157,16 @@ def _outcome_status(status: JobStatus) -> OutcomeStatus:
 
 
 class RepositoryJobRunner:
-    def __init__(self, job: RepositoryUpgradeJob, stages: PipelineStages, artifacts_root: Path) -> None:
+    def __init__(
+        self,
+        job: RepositoryUpgradeJob,
+        stages: PipelineStages,
+        artifacts_root: Path,
+        llm_factory: LLMFactory | None = None,
+    ) -> None:
         self.job = job
         self.stages = stages
+        self.llm_factory = llm_factory
         self.run_id = new_run_id(job)
         self.artifacts_dir = (artifacts_root / self.run_id).resolve()
         record = job.dependency_record
@@ -162,6 +191,7 @@ class RepositoryJobRunner:
         )
         self.adapter: PackageManagerAdapter | None = None
         self.policy_decisions: list[dict] = []
+        self._applied_digests: set[str] = set()
 
     @property
     def worktree(self) -> Path:
@@ -170,6 +200,23 @@ class RepositoryJobRunner:
     # -- public ------------------------------------------------------------------
 
     def run(self) -> tuple[DepBotState, RepositoryUpgradeOutcome]:
+        # Each job runs in its own copied context: an LLM client bound here (or by a
+        # stage) can never leak into another job, even under concurrent execution.
+        return contextvars.copy_context().run(self._run_with_llm)
+
+    def _run_with_llm(self) -> tuple[DepBotState, RepositoryUpgradeOutcome]:
+        if self.llm_factory is None:
+            return self._run()  # inherit whatever the caller bound (or nothing)
+        try:
+            client = self.llm_factory()
+        except LLMError as exc:
+            self._fail(JobStatus.BLOCKED, f"LLM client could not be created: {exc}")
+            self._finalize()
+            return self.state, self._outcome(None)
+        with use_llm_client(client):
+            return self._run()
+
+    def _run(self) -> tuple[DepBotState, RepositoryUpgradeOutcome]:
         skipped_reason: str | None = None
         try:
             self._inspect()
@@ -185,6 +232,8 @@ class RepositoryJobRunner:
             self._fail(JobStatus.BLOCKED if exc.blocked else self._stage_failure(), str(exc))
         except UnsafePath as exc:
             self._fail(JobStatus.BLOCKED, f"unsafe path from stage output: {exc}")
+        except LLMError as exc:  # incl. LLMNotConfigured: an explained, not internal, failure
+            self._fail(self._stage_failure(), f"LLM: {exc}")
         except Exception as exc:  # a bug in a stage or in DepBot: fail this job only
             log.exception("job %s crashed", self.run_id)
             self._fail(self._stage_failure(), f"internal error: {type(exc).__name__}: {exc}")
@@ -212,6 +261,9 @@ class RepositoryJobRunner:
             declared = self.adapter.find_dependency(self.worktree, self.state.dependency.name)
         except PackageManagerError as exc:
             raise StageError(f"package manager: {exc}", blocked=True) from exc
+        problems = self.adapter.environment_problems()
+        if problems:
+            raise StageError(f"{self.adapter.name.value} tooling: " + "; ".join(problems), blocked=True)
         # The index is only a candidate filter: revalidate against the fresh copy.
         try:
             if compare(declared.version, self.state.dependency.target_version) >= 0:
@@ -318,7 +370,6 @@ class RepositoryJobRunner:
         self.state.manifest_change = change
         _write(self.artifacts_dir / "patches" / "manifest.diff", change.unified_diff)
 
-        allowed = self._allowed_paths()
         if self.state.migration_plan:
             patches = self.stages.patch(
                 worktree=self.worktree,
@@ -326,33 +377,46 @@ class RepositoryJobRunner:
                 changes=self.state.breaking_changes,
                 usages=self.state.usages,
             )
-            for patch in patches:
-                for rel in patch.files:
-                    try:
-                        safe_join(self.worktree, rel)
-                    except UnsafePath as exc:
-                        raise StageError(f"patch {patch.patch_id}: {exc}", blocked=True) from exc
-                    if not is_allowed(rel, allowed):
-                        raise StageError(
-                            f"patch {patch.patch_id} touches {rel}, outside approved scope {allowed}",
-                            blocked=True,
-                        )
-                applied = self.stages.apply(worktree=self.worktree, patch=patch, allowed_paths=allowed)
-                self.state.patches.append(applied)
-                if applied.status != PatchStatus.APPLIED:
+            self._apply_patches(patches)
+        self._check_scope_and_transition("")
+
+    def _apply_patches(self, patches: list[SourcePatch]) -> None:
+        allowed = self._allowed_paths()
+        for patch in patches:
+            for rel in patch.files:
+                try:
+                    safe_join(self.worktree, rel)
+                except UnsafePath as exc:
+                    raise StageError(f"patch {patch.patch_id}: {exc}", blocked=True) from exc
+                if not is_allowed(rel, allowed):
                     raise StageError(
-                        f"patch {patch.patch_id} not applied: {applied.rejection_reason or applied.status}"
+                        f"patch {patch.patch_id} touches {rel}, outside approved scope {allowed}",
+                        blocked=True,
                     )
+            digest = hashlib.sha256(patch.unified_diff.encode()).hexdigest()
+            if digest in self._applied_digests:
+                raise StageError(f"patch {patch.patch_id} repeats an already-applied diff; stopping")
+            applied = self.stages.apply(worktree=self.worktree, patch=patch, allowed_paths=allowed)
+            self.state.patches.append(applied)
+            if applied.status != PatchStatus.APPLIED:
+                raise StageError(
+                    f"patch {patch.patch_id} not applied: {applied.rejection_reason or applied.status}"
+                )
+            self._applied_digests.add(digest)
+            _write(self.artifacts_dir / "patches" / f"{patch.patch_id}.diff", patch.unified_diff)
+
+    def _check_scope_and_transition(self, prefix: str) -> None:
         # Final scope check over everything that actually changed in the copy.
+        allowed = self._allowed_paths()
         changed = changed_files(self.worktree)
         manifest = self.state.dependency.manifest_path
         unexpected = [p for p in changed if p != manifest and not is_allowed(p, allowed)]
         if unexpected:
             raise StageError(f"unexpected file changes outside plan: {unexpected}", blocked=True)
         self.state.changed_files = changed
-        self.state.transition(JobStatus.PATCHED, f"{len(changed)} file(s) changed")
+        self.state.transition(JobStatus.PATCHED, f"{prefix}{len(changed)} file(s) changed")
 
-    def _verify(self) -> None:
+    def _run_upgraded_verification(self) -> tuple[JobStatus, str] | None:
         assert self.adapter is not None
         result = self.stages.verify(
             worktree=self.worktree,
@@ -363,12 +427,16 @@ class RepositoryJobRunner:
         )
         self._record_commands(result)
         self.state.verification = result
-        failure = _verification_failure(result, self.job.policy.require_tests)
-        if failure is not None:
+        return _verification_failure(result, self.job.policy.require_tests)
+
+    def _verify(self) -> None:
+        failure = self._run_upgraded_verification()
+        while failure is not None:
             status, reason = failure
-            # Repair stage is not part of contract v0.1.0; failures are terminal for now.
             self.state.transition(status, reason)
-            return
+            if not self._try_repair():
+                return
+            failure = self._run_upgraded_verification()
         sources_changed = [p for p in self.state.changed_files if p != self.state.dependency.manifest_path]
         if sources_changed:
             self.state.transition(JobStatus.VERIFIED, "upgraded install/configure/build/tests passed")
@@ -376,6 +444,55 @@ class RepositoryJobRunner:
             self.state.transition(
                 JobStatus.NO_CHANGES_NEEDED, "no impacted usages; upgraded build/tests passed"
             )
+
+    def _try_repair(self) -> bool:
+        """One bounded repair attempt. True if a repair was applied and must be re-verified.
+        Leaves the state in its FAILED_* status when no repair is possible."""
+        st = self.state
+        if self.stages.repair is None or st.status not in (JobStatus.FAILED_BUILD, JobStatus.FAILED_TESTS):
+            return False
+        if st.repair_attempts >= st.max_repair_attempts:
+            st.status_reason = f"{st.status_reason} (repair limit {st.max_repair_attempts} reached)"
+            return False
+        assert st.verification is not None
+        attempt = st.repair_attempts + 1
+        patches = self.stages.repair(
+            worktree=self.worktree, state=st, failure=st.verification, attempt=attempt
+        )
+        if not patches:
+            st.status_reason = f"{st.status_reason} (repair attempt {attempt}: no repair proposed)"
+            return False
+        st.transition(JobStatus.PLANNED, f"repair attempt {attempt}: {len(patches)} patch(es)")
+        self._apply_patches(patches)
+        self._check_scope_and_transition(f"repair attempt {attempt}: ")
+        return True
+
+    def _deliver(self) -> None:
+        """Local PR artifact always (if the gate allows); GitHub only when requested."""
+        st = self.state
+        copy = st.repo_facts.get("working_copy") or {}
+        base = self.job.repository.default_branch or copy.get("source_branch")
+        try:
+            draft = prepare_pull_request(st, self.job.policy, self.artifacts_dir, base_branch=base)
+        except Exception as exc:
+            log.warning("could not write PR artifact for %s: %s", self.run_id, exc)
+            return
+        if draft is None:
+            st.repo_facts["pull_request"] = {"skipped": "pre-PR policy gate did not allow a PR"}
+            return
+        if self.job.create_pr and st.status == JobStatus.VERIFIED:
+            if copy.get("mode") != "clone":
+                draft = draft.model_copy(
+                    update={"publish_note": "working copy is a snapshot (not a Git root); cannot publish"}
+                )
+            else:
+                draft = publish_pull_request(draft, st)
+            if draft.published and draft.url:
+                st.pr_url = draft.url
+                st.transition(JobStatus.PR_CREATED, f"PR opened: {draft.url}")
+            else:
+                st.transition(JobStatus.FAILED_PR, f"verified; PR not created: {draft.publish_note}")
+        st.repo_facts["pull_request"] = draft.model_dump(mode="json")
 
     # -- bookkeeping -----------------------------------------------------------
 
@@ -417,6 +534,8 @@ class RepositoryJobRunner:
                     )
             except Exception as exc:  # evidence capture must not mask the job result
                 log.warning("could not capture final diff for %s: %s", self.run_id, exc)
+        if self.state.status in (JobStatus.VERIFIED, JobStatus.NO_CHANGES_NEEDED):
+            self._deliver()
         try:
             path = self.stages.report(state=self.state, artifacts_dir=self.artifacts_dir)
             self.state.report_path = str(path)
@@ -455,11 +574,17 @@ class RepositoryJobRunner:
             to_version=st.dependency.target_version,
             changed_files=st.changed_files,
             report_path=st.report_path,
+            pr_url=st.pr_url,
             verification_passed=passed,
         )
 
 
 def run_repository_job(
-    job: RepositoryUpgradeJob, stages: PipelineStages, *, artifacts_root: Path
+    job: RepositoryUpgradeJob,
+    stages: PipelineStages,
+    *,
+    artifacts_root: Path,
+    llm_factory: LLMFactory | None = None,
 ) -> tuple[DepBotState, RepositoryUpgradeOutcome]:
-    return RepositoryJobRunner(job, stages, artifacts_root).run()
+    """Run one job. ``llm_factory`` creates this job's own LLM client (see llm.runtime)."""
+    return RepositoryJobRunner(job, stages, artifacts_root, llm_factory).run()
