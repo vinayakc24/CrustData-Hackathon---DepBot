@@ -1,4 +1,4 @@
-# DepBot Contract Handoff — v0.7.0
+# DepBot Contract Handoff — v0.8.0
 
 Owner: **Member A**. These contracts are frozen for the first end-to-end demo.
 B and C implement against them; if you need a change, propose it to A (field,
@@ -21,7 +21,7 @@ ReleaseEvent → BreakingChange → CodeUsage → PlannedChange → SourcePatch(
 | `Dependency` | **name, current_version, target_version, package_manager, manifest_path**, is_direct=True | |
 | `RepositoryRecord` | **repository_id, repo_url_or_path, display_name**, policy_id, enabled=True, allowed_paths=[] | registry entry |
 | `RepositoryDependencyRecord` | **repository_id, dependency_name, current_version, package_manager, manifest_path**, indexed_commit | inventory entry |
-| `UpgradePolicy` | allowed_change_levels=[patch,minor], require_tests=True, require_baseline=True, minimum_migration_confidence=0.80, max_repair_attempts=2 (≤3), major_approved=False, auto_merge=False (True rejected) | |
+| `UpgradePolicy` | allowed_change_levels=[patch,minor], require_tests=True, require_baseline=True, minimum_migration_confidence=0.80, max_repair_attempts=2 (≤3), major_approved=False, auto_merge=False (True rejected), build_configurations=["Release"] (non-empty subset of Release/Debug, no duplicates) | |
 | `BreakingChange` *(B produces)* | **id, title, change_type, affected_symbols, migration_advice, evidence_urls, confidence**, replacement_symbols=[], old_behavior, new_behavior, evidence_excerpt | non-`unknown` changes **must** have evidence_urls; confidence ∈ [0,1] |
 | `CodeUsage` *(B produces)* | **symbol, file_path, line_start, line_end, snippet, analysis_method, impact, related_change_ids, confidence** | lines 1-based, end ≥ start; `analysis_method="ripgrep"` for text search |
 | `PlannedChange` *(C produces)* | **file_path, reason, related_change_ids (≥1), expected_change**, related_usage_lines=[], risk=`low`, confidence=1.0 | every edit cites a change ID |
@@ -177,7 +177,10 @@ Notes for C:
 
 After VERIFIED or NO_CHANGES_NEEDED the engine writes `pr/pr-body.md` and `pr/pr.json` (local PR
 artifact, built only from recorded evidence) when the pre-PR gate allows. With `create_pr=True`
-it pushes the branch to the source's GitHub `origin` and runs `gh pr create` (no merge).
+it pushes the branch to the source's GitHub `origin` and opens the PR via REST
+(`gh api POST repos/{owner}/{repo}/pulls`; no merge). The body never contains local absolute paths:
+the worktree becomes `.`, and the artifacts dir, Conan home, source repo, DepBot checkout and home dir become
+`<artifacts>`, `<conan-home>`, `<repo>`, `<depbot>` and `~`. Other absolute paths keep only their last two parts.
 C's `write_repository_report` runs after this, so `state.pr_url` / `state.repo_facts["pull_request"]`
 are available to the report.
 
@@ -331,6 +334,17 @@ target, not just the target version's section.
 
 ## 7. Change log
 
+- 0.8.0 — additive:
+  - **`UpgradePolicy.build_configurations`** (default `["Release"]`): each verification phase (baseline,
+    probe, upgraded) installs, configures, builds and tests every listed configuration, and passes only if
+    all pass. `["Release", "Debug"]` is the P1 matrix (B's pipeline). Per-configuration evidence goes to
+    `verification/<phase>/configuration-matrix.json`.
+  - **Single-result fields:** `VerificationResult`'s single command fields describe the first failing
+    configuration, otherwise Release (or the only configuration). Debug commands are labelled `<phase>.debug.*`.
+  - **PR delivery:** opens the PR via REST, and the body has local paths redacted (see Delivery).
+  - **R2:** also parses changelog list items ``- `old` - replaced by `new` `` / `` `old`: use `new` instead ``.
+  - **R3:** an unknown paragraph counts as explained when a concrete LLM finding quotes part of it.
+  - **I2:** handles type-alias and template references (`TYPE_REF`/`TEMPLATE_REF`).
 - 0.7.0 — the cascades are implemented end to end (A, at the owner's request, in B's and C's areas):
   - **Impact (§9):** `find_impacted_usages` runs I1 text → I2 `code_intelligence/clang_analyzer.py`
     (USR resolution over the baseline compile database) → I3 probe diagnostics → I4 LLM for the residue.

@@ -328,7 +328,7 @@ def test_verification_includes_adapter_cmake_configure_args_and_minimal_env(tmp_
     configure_args = next(args for label, args, _env in captured if label.endswith(".configure"))
     assert result.passed
     assert "-DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake" in configure_args
-    assert install_envs == [expected_env, expected_env]
+    assert install_envs == [expected_env]  # default policy: Release only
     assert all(env == expected_env for _label, _args, env in captured)
 
 
@@ -373,7 +373,7 @@ def test_verification_recreates_build_dir_before_each_phase(tmp_path: Path, monk
         assert result.passed
         (build_dir / "stale-cache.txt").write_text("stale", encoding="utf-8")
 
-    assert captured == [False, False, False, False]
+    assert captured == [False, False]
 
 
 def test_ctest_failure_names_are_extracted_from_recorded_output(tmp_path: Path):

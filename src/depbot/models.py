@@ -12,6 +12,8 @@ Data flow (each arrow is a typed hand-off):
 
 from __future__ import annotations
 
+from typing import Literal
+
 from datetime import datetime, timezone
 from enum import StrEnum
 
@@ -222,6 +224,9 @@ class UpgradePolicy(_Model):
     require_tests: bool = True
     require_baseline: bool = True
     require_release_build: bool = False
+    # CMake configurations each verification phase builds and tests; all must pass.
+    # Default Release only (P0); add Debug for the P1 configuration matrix.
+    build_configurations: list[Literal["Release", "Debug"]] = Field(default_factory=lambda: ["Release"])
     require_human_approval_for_major: bool = True
     # Explicit approval flag set by the operator (e.g. `--approve-major`).
     major_approved: bool = False
@@ -231,6 +236,13 @@ class UpgradePolicy(_Model):
     refuse_dirty_worktree: bool = True
     create_pr_on_failure: bool = False
     auto_merge: bool = False
+
+    @field_validator("build_configurations")
+    @classmethod
+    def _configurations(cls, value: list[str]) -> list[str]:
+        if not value or len(set(value)) != len(value):
+            raise ValueError("build_configurations must be a non-empty list without duplicates")
+        return value
 
     @field_validator("auto_merge")
     @classmethod

@@ -10,6 +10,7 @@ caller's GitHub credentials.
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 from collections.abc import Callable
@@ -44,6 +45,36 @@ class PullRequestDraft(BaseModel):
 
 def _fmt_cmd(args: list[str]) -> str:
     return " ".join(args).replace("|", "\\|")
+
+
+def _local_roots(state: DepBotState) -> list[tuple[str, str]]:
+    """Machine-specific prefixes to hide in the PR body, most specific first."""
+    roots = [(state.worktree_path, "."), (state.artifacts_dir, "<artifacts>"),
+             (os.environ.get("DEPBOT_CONAN_HOME"), "<conan-home>"), (os.environ.get("CONAN_HOME"), "<conan-home>"),
+             (state.original_repo, "<repo>"), (os.getcwd(), "<depbot>"), (str(Path.home()), "~")]
+    out: dict[str, str] = {}
+    for raw, label in roots:
+        if not raw or not os.path.isabs(raw) or raw == "/":
+            continue
+        for variant in {raw.rstrip("/"), str(Path(raw).resolve()).rstrip("/")}:
+            out.setdefault(variant, label)
+    return sorted(out.items(), key=lambda item: -len(item[0]))
+
+
+_ABS_TAIL = re.compile(r"(?<![\w.~<>:/-])/(?:[\w.+@-]+/)*[\w.+@-]+")
+
+
+def redact_local_paths(text: str, state: DepBotState) -> str:
+    """Replace local absolute paths (worktree, artifacts, Conan home, home dir) with
+    stable placeholders so a published PR never reveals the runner's filesystem."""
+    for prefix, label in _local_roots(state):
+        text = text.replace(f"file://{prefix}/", f"{label}/" if label != "." else "")
+        text = text.replace(f"file://{prefix}", label)
+        text = re.sub(re.escape(prefix) + r"(?=/|\b|$)", label, text)
+    # Anything still absolute and outside the known roots (e.g. /tmp scratch dirs) keeps
+    # only its last two components.
+    return _ABS_TAIL.sub(lambda m: "…/" + "/".join(m.group(0).split("/")[-2:]) if m.group(0).count("/") > 2
+                         else m.group(0), text)
 
 
 def build_pr_body(state: DepBotState, gate: PolicyDecision, *, published: bool) -> str:
@@ -113,7 +144,7 @@ def build_pr_body(state: DepBotState, gate: PolicyDecision, *, published: bool) 
         "- This PR must be reviewed and merged by a human.",
         "",
     ]
-    return "\n".join(lines)
+    return redact_local_paths("\n".join(lines), state)
 
 
 def prepare_pull_request(

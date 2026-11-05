@@ -101,3 +101,19 @@ def test_create_pr_on_git_repo_opens_pr(job, tmp_path, monkeypatch):
     assert outcome.status == OutcomeStatus.VERIFIED and outcome.pr_url.endswith("/pull/7")
     assert state.repo_facts["working_copy"]["mode"] == "clone"
     assert "base=main" in fake.calls[-1]
+
+
+def test_pr_body_hides_local_paths_but_keeps_urls(job, tmp_path, monkeypatch):
+    conan_home = tmp_path / "home" / "conan"
+    monkeypatch.setenv("DEPBOT_CONAN_HOME", str(conan_home))
+    state, _ = run_repository_job(job, _stages(), artifacts_root=tmp_path / "a")
+    change = CHANGE.model_copy(update={"evidence_urls": [
+        f"file://{conan_home}/p/b/toyd123/p/include/toydep/toydep.hpp",
+        "https://github.com/fmtlib/fmt/releases/tag/7.0.0", "file://CHANGELOG.md"]})
+    state = state.model_copy(update={"breaking_changes": [change]})
+    draft = prepare_pull_request(state, job.policy, tmp_path / "a" / state.run_id, base_branch="main")
+    body = open(draft.body_path).read()
+    assert str(tmp_path) not in body and state.worktree_path not in body
+    assert "<conan-home>/p/b/toyd123/p/include/toydep/toydep.hpp" in body
+    assert "https://github.com/fmtlib/fmt/releases/tag/7.0.0" in body and "file://CHANGELOG.md" in body
+    assert "`ctest --test-dir ./build" in body or "ctest" not in body
