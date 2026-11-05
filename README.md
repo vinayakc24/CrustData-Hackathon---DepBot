@@ -99,7 +99,11 @@ Add the upstream projects to watch to the fleet config:
 watches:
   - dependency_name: fmt          # as declared in conanfile.txt / vcpkg.json
     upstream_repo: fmtlib/fmt     # GitHub owner/name
+    tag_prefix: ""                # e.g. "fmt-" if release tags look like fmt-11.0.2
 ```
+
+Set `DEPBOT_GITHUB_TOKEN` to a read-only token to raise GitHub's anonymous limit (60 requests/hour).
+It is sent only to `api.github.com`, never on redirects, and is separate from the PR-publishing credential.
 
 ```bash
 depbot monitor --fleet depbot-fleet.yaml --once --dry-run   # what would happen, nothing recorded
@@ -148,6 +152,20 @@ source repository's GitHub `origin` and runs `gh pr create`. That happens only
 after the pre-PR policy gate passes, and it never auto-merges.
 Without `--create-pr`, or for repositories without a GitHub remote, DepBot
 writes a clearly labelled local PR artifact instead.
+
+## How DepBot decides what changed and where
+
+Deterministic layers settle everything they can prove before an LLM is consulted:
+
+- **What changed:** R1 diffs the dependency's old and new public headers (libclang; `api_diff.json`).
+  R2 parses the release notes for every version in the range. R3, the LLM, only sees what both left
+  unexplained, and its findings are added, never replacing.
+- **Where it hits:** I1 finds text matches (ripgrep). I2 resolves each one to the exact declaration it names
+  (libclang). I3 uses compiler errors from a probe build against the new version. I4, the LLM, only sees
+  what is still unresolved. Only AST- or compiler-proven usages are edited automatically.
+
+`pip install -e ".[ast]"` enables the libclang layers (system libclang 18). Without it, DepBot falls back
+to text matching.
 
 ## Safety guarantees
 

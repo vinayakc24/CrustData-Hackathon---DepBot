@@ -35,6 +35,7 @@ class DependencyWatch(BaseModel):
 
     dependency_name: str  # as declared in manifests, e.g. "fmt"
     upstream_repo: str  # GitHub "owner/name"
+    tag_prefix: str = ""  # e.g. "fmt-" when release tags look like "fmt-11.0.2"
     enabled: bool = True
 
     @model_validator(mode="after")

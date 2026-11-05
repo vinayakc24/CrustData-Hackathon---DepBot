@@ -90,3 +90,40 @@ def find_version_section(changelog_text: str, target_version: str) -> ChangelogS
         line_start=index + 1,
         line_end=end_line,
     )
+
+
+def find_sections_in_range(
+    changelog_text: str, *, after_version: str | None, through_version: str
+) -> list[ChangelogSection]:
+    """All version sections with ``after_version < version <= through_version``, in file order.
+
+    A 1.0 → 3.0 upgrade must see the breaking changes documented under 2.0 as well.
+    Headings whose versions cannot be compared are skipped; duplicates raise.
+    """
+    from depbot.fleet.versions import UnparseableVersion, compare
+
+    lines = changelog_text.splitlines(keepends=True)
+    headings: list[tuple[int, str, str]] = []
+    for index, line in enumerate(lines):
+        parsed = _heading_version(line)
+        if parsed is not None:
+            headings.append((index, parsed[0], parsed[1]))
+    seen: set[str] = set()
+    sections: list[ChangelogSection] = []
+    for position, (index, version, heading) in enumerate(headings):
+        normalized = _normalize(version)
+        try:
+            if compare(normalized, _normalize(through_version)) > 0:
+                continue
+            if after_version and compare(normalized, _normalize(after_version)) <= 0:
+                continue
+        except UnparseableVersion:
+            continue
+        if normalized in seen:
+            raise ChangelogParseError(f"duplicate changelog sections for version {version!r}")
+        seen.add(normalized)
+        next_index = headings[position + 1][0] if position + 1 < len(headings) else len(lines)
+        content = "".join(lines[index + 1:next_index])
+        sections.append(ChangelogSection(version=version, heading=heading, content=content,
+                                         line_start=index + 1, line_end=next_index))
+    return sections
