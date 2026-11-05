@@ -45,7 +45,7 @@ def layout(tmp_path):
     art.mkdir()
     (art / "compile_commands.baseline.json").write_text(json.dumps([{
         "directory": str(wt / "build"), "file": str(wt / "src" / "main.cpp"),
-        "arguments": ["c++", "-std=c++17", "-isystem", str(dep.parent), "-o", "main.o", "-c",
+        "arguments": ["c++", "-std=c++17", "-U_WIN32", "-isystem", str(dep.parent), "-o", "main.o", "-c",
                       str(wt / "src" / "main.cpp")]}]))
     return wt, art
 

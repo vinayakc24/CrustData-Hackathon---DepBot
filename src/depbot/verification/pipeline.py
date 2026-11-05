@@ -152,98 +152,69 @@ def run_verification(
     policy: UpgradePolicy,
     artifacts_dir: Path,
 ) -> VerificationResult:
-    """Run package resolution followed by CMake configure, build and CTest.
+    """Run the isolated Debug and Release CMake verification configurations.
 
-    Each phase stops at its first failed prerequisite. A required test suite with
-    zero discovered tests is reported as unpassed.
+    The frozen ``VerificationResult`` schema exposes one set of command fields,
+    which continues to describe Release for compatibility. Full per-configuration
+    evidence is written to ``verification/<phase>/configuration-matrix.json``.
+    The phase passes only if both configurations pass.
     """
     worktree = worktree.resolve()
+    # Clear stale caches from the prior verification phase, then retain both
+    # configuration-specific trees so both compile databases remain available.
     _reset_build_dir(worktree)
-    logs_dir = artifacts_dir / "commands" / phase.value
-    logs_dir.mkdir(parents=True, exist_ok=True)
     extra_env = minimal_env(adapter.command_env())
-    results: dict[str, CommandResult | None] = {"install": None, "configure": None, "build": None, "tests": None}
-
-    try:
-        install_args = adapter.install_args(worktree, build_type="Release")
-    except Exception as exc:
-        # Adapter refusal is an observed install-stage failure and is not hidden.
-        result = run_command(
-            command_label=f"{phase.value}.dependency_install",
-            args=[],
-            cwd=worktree,
-            artifacts_dir=logs_dir,
-            timeout_seconds=INSTALL_TIMEOUT_SECONDS,
-            extra_env=extra_env,
-        ).model_copy(update={"stderr_tail": f"adapter install_args failed: {type(exc).__name__}: {exc}"})
-        results["install"] = result
-    else:
-        results["install"] = run_command(
-            command_label=f"{phase.value}.dependency_install",
-            args=install_args,
-            cwd=worktree,
-            artifacts_dir=logs_dir,
-            timeout_seconds=INSTALL_TIMEOUT_SECONDS,
+    configurations: dict[str, dict] = {}
+    for build_type in ("Release", "Debug"):
+        # Conan and CMake generate configuration-specific toolchains/presets.
+        configurations[build_type] = _run_configuration(
+            worktree=worktree,
+            adapter=adapter,
+            phase=phase,
+            build_type=build_type,
+            policy=policy,
+            artifacts_dir=artifacts_dir,
             extra_env=extra_env,
         )
 
-    preset = adapter.cmake_preset(build_type="Release")
-    preset_dir = _preset_build_dir(worktree, preset) if preset else None
-    build_dir = preset_dir or (worktree / "build" / phase.value)
-    if results["install"] is not None and results["install"].succeeded:
-        if preset and preset_dir is not None:
-            configure_args = ["cmake", "--preset", preset]
-        else:
-            configure_args = [
-                "cmake", "-S", str(worktree), "-B", str(build_dir), "-DCMAKE_BUILD_TYPE=Release"
-            ]
-            configure_args.extend(
-                adapter.cmake_configure_args(worktree, build_type="Release")
-            )
-        results["configure"] = _run_step(
-            label=f"{phase.value}.configure", args=configure_args, worktree=worktree,
-            artifacts_dir=logs_dir, timeout=CONFIGURE_TIMEOUT_SECONDS, extra_env=extra_env,
-        )
-
-    if results["configure"] is not None and results["configure"].succeeded:
-        build_args = (
-            ["cmake", "--build", "--preset", preset, "--config", "Release"]
-            if preset and preset_dir is not None
-            else ["cmake", "--build", str(build_dir), "--config", "Release", "--parallel", "2"]
-        )
-        results["build"] = _run_step(
-            label=f"{phase.value}.build", args=build_args, worktree=worktree,
-            artifacts_dir=logs_dir, timeout=BUILD_TIMEOUT_SECONDS, extra_env=extra_env,
-        )
-
-    if results["build"] is not None and results["build"].succeeded:
-        test_args = [
-            "ctest", "--test-dir", str(build_dir), "-C", "Release", "--output-on-failure"
-        ]
-        results["tests"] = _run_step(
-            label=f"{phase.value}.tests", args=test_args, worktree=worktree,
-            artifacts_dir=logs_dir, timeout=TEST_TIMEOUT_SECONDS, extra_env=extra_env,
-        )
-
-    tests_passed = tests_failed = None
-    failed_names: list[str] = []
-    if results["tests"] is not None:
-        tests_passed, tests_failed, failed_names = _test_counts(results["tests"])
-
-    step_ok = all(
-        results[name] is not None and results[name].succeeded
-        for name in ("install", "configure", "build")
+    matrix_path = artifacts_dir / "verification" / phase.value / "configuration-matrix.json"
+    matrix_path.parent.mkdir(parents=True, exist_ok=True)
+    matrix_path.write_text(
+        json.dumps(
+            {
+                "phase": phase.value,
+                "passed": all(item["passed"] for item in configurations.values()),
+                "configurations": {
+                    name: {
+                        "passed": item["passed"],
+                        "tests_passed": item["tests_passed"],
+                        "tests_failed": item["tests_failed"],
+                        "failed_test_names": item["failed_test_names"],
+                        "commands": {
+                            key: result.model_dump(mode="json") if result else None
+                            for key, result in item["results"].items()
+                        },
+                    }
+                    for name, item in configurations.items()
+                },
+            },
+            indent=2,
+        ) + "\n",
+        encoding="utf-8",
     )
-    tests_ok = (
-        results["tests"] is not None
-        and results["tests"].succeeded
-        and tests_failed == 0
-        and (not policy.require_tests or (tests_passed is not None and tests_passed > 0))
+
+    # Keep the contract's legacy fields tied to Release when it passes. If one
+    # configuration fails, expose that failure in the legacy fields so existing
+    # outcome classification and repair logic see the actual failing command.
+    selected = next(
+        (item for item in configurations.values() if not item["passed"]),
+        configurations["Release"],
     )
-    diagnostics = diagnostics_for(
-        [results["configure"], results["build"], results["tests"]],
-        worktree=worktree, build_dirs=[build_dir],
-    )
+    results = selected["results"]
+    tests_passed = selected["tests_passed"]
+    tests_failed = selected["tests_failed"]
+    failed_names = selected["failed_test_names"]
+    diagnostics = [diagnostic for item in configurations.values() for diagnostic in item["diagnostics"]]
     verification = VerificationResult(
         phase=phase,
         diagnostics=diagnostics,
@@ -254,7 +225,147 @@ def run_verification(
         tests_passed=tests_passed,
         tests_failed=tests_failed,
         failed_test_names=failed_names,
-        passed=step_ok and (tests_ok or (not policy.require_tests and results["tests"] is not None and results["tests"].succeeded)),
+        passed=all(item["passed"] for item in configurations.values()),
         failure_category=None,
     )
-    return verification.model_copy(update={"failure_category": classify_failure(verification)})
+    failure_category = next(
+        (
+            item["failure_category"]
+            for item in configurations.values()
+            if not item["passed"] and item["failure_category"]
+        ),
+        None,
+    )
+    return verification.model_copy(
+        update={"failure_category": failure_category or classify_failure(verification)}
+    )
+
+
+def _run_configuration(
+    *,
+    worktree: Path,
+    adapter: PackageManagerAdapter,
+    phase: VerificationPhase,
+    build_type: str,
+    policy: UpgradePolicy,
+    artifacts_dir: Path,
+    extra_env: dict[str, str],
+) -> dict:
+    """Run one independent package install/configure/build/test configuration."""
+    config = build_type.lower()
+    logs_dir = artifacts_dir / "commands" / phase.value / config
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    labels = {
+        "Release": {
+            "install": f"{phase.value}.dependency_install",
+            "configure": f"{phase.value}.configure",
+            "build": f"{phase.value}.build",
+            "tests": f"{phase.value}.tests",
+        },
+        "Debug": {
+            "install": f"{phase.value}.debug.dependency_install",
+            "configure": f"{phase.value}.debug.configure",
+            "build": f"{phase.value}.debug.build",
+            "tests": f"{phase.value}.debug.tests",
+        },
+    }[build_type]
+    results: dict[str, CommandResult | None] = {
+        "install": None, "configure": None, "build": None, "tests": None
+    }
+
+    try:
+        install_args = adapter.install_args(worktree, build_type=build_type)
+    except Exception as exc:
+        results["install"] = run_command(
+            command_label=labels["install"], args=[], cwd=worktree,
+            artifacts_dir=logs_dir, timeout_seconds=INSTALL_TIMEOUT_SECONDS,
+            extra_env=extra_env,
+        ).model_copy(update={"stderr_tail": f"adapter install_args failed: {type(exc).__name__}: {exc}"})
+    else:
+        results["install"] = run_command(
+            command_label=labels["install"], args=install_args, cwd=worktree,
+            artifacts_dir=logs_dir, timeout_seconds=INSTALL_TIMEOUT_SECONDS,
+            extra_env=extra_env,
+        )
+
+    preset = adapter.cmake_preset(build_type=build_type)
+    preset_dir = _preset_build_dir(worktree, preset) if preset else None
+    build_dir = preset_dir or (worktree / "build" / phase.value / config)
+    if results["install"] is not None and results["install"].succeeded:
+        if preset and preset_dir is not None:
+            configure_args = ["cmake", "--preset", preset]
+        else:
+            configure_args = [
+                "cmake", "-S", str(worktree), "-B", str(build_dir),
+                f"-DCMAKE_BUILD_TYPE={build_type}",
+            ]
+            configure_args.extend(adapter.cmake_configure_args(worktree, build_type=build_type))
+        results["configure"] = _run_step(
+            label=labels["configure"], args=configure_args, worktree=worktree,
+            artifacts_dir=logs_dir, timeout=CONFIGURE_TIMEOUT_SECONDS, extra_env=extra_env,
+        )
+
+    if results["configure"] is not None and results["configure"].succeeded:
+        build_args = (
+            ["cmake", "--build", "--preset", preset, "--config", build_type]
+            if preset and preset_dir is not None
+            else ["cmake", "--build", str(build_dir), "--config", build_type, "--parallel", "2"]
+        )
+        results["build"] = _run_step(
+            label=labels["build"], args=build_args, worktree=worktree,
+            artifacts_dir=logs_dir, timeout=BUILD_TIMEOUT_SECONDS, extra_env=extra_env,
+        )
+
+    if results["build"] is not None and results["build"].succeeded:
+        test_args = [
+            "ctest", "--test-dir", str(build_dir), "-C", build_type, "--output-on-failure"
+        ]
+        results["tests"] = _run_step(
+            label=labels["tests"], args=test_args, worktree=worktree,
+            artifacts_dir=logs_dir, timeout=TEST_TIMEOUT_SECONDS, extra_env=extra_env,
+        )
+
+    tests_passed = tests_failed = None
+    failed_names: list[str] = []
+    if results["tests"] is not None:
+        tests_passed, tests_failed, failed_names = _test_counts(results["tests"])
+    step_ok = all(
+        results[key] is not None and results[key].succeeded
+        for key in ("install", "configure", "build")
+    )
+    tests_ok = (
+        results["tests"] is not None and results["tests"].succeeded
+        and tests_failed == 0
+        and (not policy.require_tests or (tests_passed is not None and tests_passed > 0))
+    )
+    diagnostics = diagnostics_for(
+        [results["configure"], results["build"], results["tests"]],
+        worktree=worktree, build_dirs=[build_dir],
+    )
+    check = VerificationResult(
+        phase=phase,
+        diagnostics=diagnostics,
+        dependency_install=results["install"],
+        configure=results["configure"],
+        build=results["build"],
+        tests=results["tests"],
+        tests_passed=tests_passed,
+        tests_failed=tests_failed,
+        failed_test_names=failed_names,
+        passed=step_ok and (
+            tests_ok or (
+                not policy.require_tests and results["tests"] is not None
+                and results["tests"].succeeded
+            )
+        ),
+    )
+    check = check.model_copy(update={"failure_category": classify_failure(check)})
+    return {
+        "results": results,
+        "tests_passed": tests_passed,
+        "tests_failed": tests_failed,
+        "failed_test_names": failed_names,
+        "passed": check.passed,
+        "failure_category": check.failure_category,
+        "diagnostics": diagnostics,
+    }
