@@ -72,6 +72,25 @@ artifacts/
     └── upgrade-report.md     # per-repository report
 ```
 
+### Registering GitHub repositories
+
+`repo_url_or_path` can be a local path **or** a Git URL (`https://…`, `ssh://…`, `git@host:owner/repo`):
+
+```yaml
+repositories:
+  - repository_id: service_x
+    display_name: Service X
+    repo_url_or_path: https://github.com/acme/service-x
+    default_branch: main        # optional; defaults to the remote's HEAD branch
+```
+
+On every `fleet status` / `plan` / `run`, DepBot clones the repository once into
+`<state_dir>/sources/<id>-<hash>/`, or fetches it on later runs, and checks out the tip of the branch.
+Each job then makes its isolated working copy from that cache, and `--create-pr` pushes to its GitHub `origin`.
+Access uses your existing `git`/`gh` credentials. URLs with embedded credentials
+(`https://user:token@…`) are refused, and nothing is ever pushed except an explicit `--create-pr` branch.
+`depbot upgrade --repo https://github.com/acme/service-x …` works the same way.
+
 ### Single-repository fallback
 
 ```bash
@@ -125,7 +144,7 @@ writes a clearly labelled local PR artifact instead.
 
 | Area | Owner | State |
 |---|---|---|
-| Contracts, CLI, registry, selection, policy, Conan + vcpkg adapters, working copies, engine, fleet runner, PR delivery | A | implemented and unit-tested |
+| Contracts, CLI, registry (local + GitHub repos), selection, policy, Conan + vcpkg adapters, working copies, engine, fleet runner, PR delivery | A | implemented and unit-tested |
 | Release research, code impact analysis | B | in progress |
 | Fixtures, migration planning/patching, verification, repair, per-repo reports | C | in progress |
 

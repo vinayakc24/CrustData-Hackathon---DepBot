@@ -162,3 +162,27 @@ def test_compile_db_parsing(tmp_path):
     db.write_text("{}")
     with pytest.raises(ValueError):
         load_compile_commands(db)
+
+
+def test_probe_runs_before_research_and_saves_its_compile_db(job, tmp_path):
+    order, seen = [], {}
+
+    def verify(*, worktree, adapter, phase, policy, artifacts_dir):
+        order.append(phase.value)
+        if phase in ("baseline", "probe"):
+            build = worktree / "build" / "Release"
+            build.mkdir(parents=True, exist_ok=True)
+            (build / "compile_commands.json").write_text(json.dumps(
+                [{"directory": str(build), "file": str(worktree / "src/main.cpp"), "arguments": ["c++", "-c", "x"]}]))
+        return _passing(phase)
+
+    def research(*, event, dependency, artifacts_dir):
+        order.append("research")
+        seen["probe_db"] = (artifacts_dir / "probe" / "compile_commands.json").is_file()
+        seen["baseline_db"] = (artifacts_dir / "compile_commands.baseline.json").is_file()
+        return _stages().research(event=event, dependency=dependency, artifacts_dir=artifacts_dir)
+
+    state, _ = run_repository_job(job, _stages(verify=verify, research=research), artifacts_root=tmp_path / "a")
+    assert order == ["baseline", "probe", "research", "upgraded"]
+    assert seen == {"probe_db": True, "baseline_db": True}
+    assert state.repo_facts["probe"]["compile_commands"].endswith("probe/compile_commands.json")

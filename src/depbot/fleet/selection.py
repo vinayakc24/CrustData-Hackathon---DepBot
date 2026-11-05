@@ -66,7 +66,8 @@ class RepositorySelection(BaseModel):
 
 
 def _classify(
-    event: ReleaseEvent, repo: RepositoryRecord, fleet: Fleet, index: DependencyIndex
+    event: ReleaseEvent, repo: RepositoryRecord, fleet: Fleet, index: DependencyIndex,
+    sources_dir: Path | None = None,
 ) -> RepositorySelection:
     if not repo.enabled:
         return RepositorySelection(
@@ -75,7 +76,7 @@ def _classify(
             reason="repository is disabled in the fleet registry",
         )
     try:
-        root = fleet.local_root(repo)
+        root, synced = fleet.resolve_root(repo, sources_dir)
     except RegistryError as exc:
         return RepositorySelection(
             repository=repo, classification=FleetClassification.NEEDS_RESCAN, reason=str(exc)
@@ -88,7 +89,11 @@ def _classify(
         )
 
     scan, rescanned = index.refresh(repo, root)
-    base = {"repository": repo, "repo_root": str(root), "rescanned": rescanned}
+    notes = []
+    if synced is not None:
+        verb = "cloned" if synced.cloned else "fetched"
+        notes.append(f"{verb} {synced.url} ({synced.branch} @ {synced.commit[:10]})")
+    base = {"repository": repo, "repo_root": str(root), "rescanned": rescanned, "notes": notes}
     if scan.error:
         return RepositorySelection(
             **base,
@@ -143,10 +148,11 @@ def _classify(
 
 
 def select_repositories(
-    event: ReleaseEvent, fleet: Fleet, index: DependencyIndex
+    event: ReleaseEvent, fleet: Fleet, index: DependencyIndex, *, sources_dir: Path | None = None
 ) -> list[RepositorySelection]:
-    """Classify all registered repositories. Persists any rescanned inventory."""
-    selections = [_classify(event, repo, fleet, index) for repo in fleet.repositories]
+    """Classify all registered repositories. Persists any rescanned inventory.
+    Remote repositories are synced into ``sources_dir`` first (refused when it is None)."""
+    selections = [_classify(event, repo, fleet, index, sources_dir) for repo in fleet.repositories]
     index.save()
     return selections
 

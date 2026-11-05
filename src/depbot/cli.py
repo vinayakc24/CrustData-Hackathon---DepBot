@@ -37,6 +37,7 @@ from depbot.orchestrator import load_default_stages, run_repository_job
 from depbot.package_managers.conan import CONAN_HOME_ENV
 from depbot.package_managers.conan_setup import SetupError, prepare_local_packages
 from depbot.policy.engine import pre_migration_gate
+from depbot.repository.remote import RemoteRepositoryError, is_remote, sync_remote
 
 _GOOD = {OutcomeStatus.VERIFIED, OutcomeStatus.UNAFFECTED, OutcomeStatus.SKIPPED}
 
@@ -86,7 +87,7 @@ def cmd_fleet_status(args: argparse.Namespace) -> int:
     rows = []
     for repo in fleet.repositories:
         try:
-            root = fleet.local_root(repo)
+            root, _ = fleet.resolve_root(repo, state_dir / "sources")
             scan, rescanned = index.refresh(repo, root) if root.is_dir() else (None, False)
         except RegistryError as exc:
             rows.append({"repository_id": repo.repository_id, "error": str(exc)})
@@ -137,7 +138,9 @@ def cmd_fleet_plan(args: argparse.Namespace) -> int:
     fleet, state_dir = _load(args)
     event = load_event(Path(args.event))
     duplicate = EventLog(state_dir / "events.json").find_duplicate(event)
-    selections = select_repositories(event, fleet, DependencyIndex(state_dir / "inventory.json"))
+    selections = select_repositories(
+        event, fleet, DependencyIndex(state_dir / "inventory.json"), sources_dir=state_dir / "sources"
+    )
     rows = [_selection_row(s) for s in selections]
     jobs = [r["repository_id"] for r in rows if r["eligible_for_job"]]
     if args.json:
@@ -236,10 +239,23 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 def cmd_upgrade(args: argparse.Namespace) -> int:
     """Targeted single-repository upgrade through the same migration engine."""
-    root = Path(args.repo).resolve()
     if args.conan_home:
         _use_conan_home(Path(args.conan_home))
-    repo = RepositoryRecord(repository_id=root.name, repo_url_or_path=str(root), display_name=root.name)
+    if is_remote(args.repo):
+        name = args.repo.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git") or "repo"
+        repo = RepositoryRecord(repository_id=name, repo_url_or_path=args.repo, display_name=name,
+                                default_branch=args.base)
+        try:
+            synced = sync_remote(repo, Path(args.state_dir or ".depbot").resolve() / "sources")
+        except RemoteRepositoryError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        root = Path(synced.path)
+        print(f"synced {synced.url} ({synced.branch} @ {synced.commit[:10]}) -> {root}")
+    else:
+        root = Path(args.repo).resolve()
+        repo = RepositoryRecord(repository_id=root.name, repo_url_or_path=str(root), display_name=root.name,
+                                default_branch=args.base)
     scan = scan_repository(repo, root)
     if scan.error:
         print(f"error: {scan.error}", file=sys.stderr)
@@ -317,7 +333,9 @@ def build_parser() -> argparse.ArgumentParser:
     run.set_defaults(func=cmd_run)
 
     up = sub.add_parser("upgrade", help="targeted single-repository upgrade")
-    up.add_argument("--repo", required=True, help="local repository path")
+    up.add_argument("--repo", required=True, help="local repository path or Git URL (https/ssh)")
+    up.add_argument("--base", help="base branch (default: the repository's current/default branch)")
+    up.add_argument("--state-dir", help="where remote repositories are cached (default: ./.depbot)")
     up.add_argument("--dependency", required=True)
     up.add_argument("--to", required=True, help="target version")
     up.add_argument("--changelog", help="local changelog/release-notes file for research")

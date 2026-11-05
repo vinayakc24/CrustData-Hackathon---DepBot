@@ -1,4 +1,4 @@
-# DepBot Contract Handoff — v0.5.0
+# DepBot Contract Handoff — v0.6.0
 
 Owner: **Member A**. These contracts are frozen for the first end-to-end demo.
 B and C implement against them; if you need a change, propose it to A (field,
@@ -281,8 +281,64 @@ I1 ripgrep prefilter → I2 libclang USR resolution → I3 compiler probe → I4
    with repository-relative paths (`None` for files outside the worktree), in every phase. The probe phase is the important one.
 3. Phase `probe` is a normal verification run; no special casing is needed.
 
+## 10. What changed — research cascade R1 → R2 → R3
+
+`research_release` should return one merged list in which every entry records its `source`
+(`api_diff`, `changelog_rule` or `llm`). The deterministic layers run first, and the LLM only sees what they left over.
+
+**R1 — header API diff (built by A, `depbot.research.header_diff`)**
+
+```python
+from depbot.research.header_diff import diff_dependency_api_for_job, confirm_replacements
+
+api = diff_dependency_api_for_job(artifacts_dir=artifacts_dir, dependency=dependency.name,
+                                  to_version=event.target_version)
+# api.available False → libclang or compile databases missing: skip R1 (api.reason says why)
+# api.complete False  → new headers didn't parse; removals were withheld (not "no changes")
+# api.changes         → list[BreakingChange], source="api_diff", ids "<dep>-<ver>-API<n>"
+```
+
+- **Input:** the engine runs the probe *before* research, so `compile_commands.baseline.json` (old version)
+  and `probe/compile_commands.json` (new version) both exist when `research_release` runs. Include
+  directories identical in both are unchanged dependencies; the rest are the upgraded dependency's headers.
+  This works for Conan (separate package folders) and vcpkg (installed trees) without extra adapter code.
+- **What it reports:** removed declarations, signature changes (parameter or return type), newly
+  `[[deprecated]]` declarations, removed enumerators, and changed macro bodies (version-number macros ignored).
+  Internal namespaces (`detail`, `internal`, `impl`) and private members are excluded.
+- **Fields:** `affected_symbols` (simple name, for text search), `affected_usrs` (exact declarations, for the AST
+  impact layer), `old_behavior`/`new_behavior` (signatures), `evidence_excerpt` (the verbatim header line).
+- **Never invents a replacement.** A same-signature new declaration is only mentioned as a *candidate* in
+  `migration_advice`; `replacement_symbols` stays empty until R2 confirms it.
+
+**R2 — changelog rules (B, existing `_deterministic_changes`)**, then cross-check:
+
+```python
+merged = confirm_replacements(api.changes, changelog_changes, api)
+```
+
+This attaches a changelog replacement (e.g. `old_sum` → `sum`) to the matching API removal, but only if every
+replacement symbol exists in the new headers. Changelog claims with no API counterpart (e.g. behaviour changes)
+are kept as they are.
+
+**R3 — LLM (B), leftovers only:**
+- Only paragraphs R2 left `unknown`, plus API removals still without a replacement, go to the LLM.
+- Its results are **added** to the list; they never replace deterministic findings. Today the code
+  does `return llm_changes if llm_changes else deterministic`, which discards them.
+- No leftovers → no LLM call.
+
+**Also for B:** read every changelog section in the version range above the current version up to the
+target, not just the target version's section.
+
 ## 7. Change log
 
+- 0.6.0 — additive: `ChangeSource` and `BreakingChange.source` / `.affected_usrs`; R1 header API diff
+  (`depbot.research.header_diff`, written by A at the team's request; B wires it); shared libclang loader
+  `depbot.clang_support` (also for B's AST impact layer); engine runs the probe **before** research and saves
+  `probe/compile_commands.json`; optional extra `pip install -e ".[ast]"`.
+- 0.5.1 — additive: remote repositories. `RepositoryRecord.repo_url_or_path` may be a Git URL;
+  `Fleet.resolve_root(repo, sources_dir)` syncs it into `<state_dir>/sources/`, and
+  `select_repositories(..., sources_dir=)` passes that through (without it, remotes are refused as before).
+  `RepositoryUpgradeJob.repo_root` is always a local path (the cache for remotes), so stages are unaffected.
 - 0.5.0 — additive: impact-cascade provenance on `CodeUsage` (`resolved_by`, `resolution_proof`, `resolved_usr`,
   `declaration_file`, `preprocessor_context`), `ResolutionLayer`, `AnalysisMethod.COMPILER_DIAGNOSTIC`,
   `CompilerDiagnostic` + `VerificationResult.diagnostics`, `VerificationPhase.PROBE`, `DepBotState.probe`,
