@@ -4,7 +4,7 @@
 - **Original implementation branch:** `member-c/migration-verification-reporting`
 - **Original development base:** `a49eab83e13752a86aabb2fdf7fa6a927cfbc40f`
 - **Follow-up branch:** `member-c/conan-e2e-reporting`
-- **Follow-up base (current fork/upstream main):** `999e09931fbdfd686699f63d793b6ac30f08a50e`
+- **Follow-up base (current fork/upstream main):** `1b1a1deb7da003420bd888c8921e3949a43fc00c`
 - **Date:** 2026-11-06
 
 ## Changes delivered
@@ -55,7 +55,7 @@
 
 **This report:** `reports/member-c-implementation-report.md`.
 
-The original Member C implementation added migration, verification, reporting, fixture, and test files. Its initial six-commit sync was completed before this follow-up; before publishing, the follow-up branch and fork main were fast-forwarded by ten newer upstream commits to the current main SHA listed above.
+The original Member C implementation added migration, verification, reporting, fixture, and test files. Its initial six-commit sync was completed before this follow-up; before publishing, the follow-up branch and fork main were first fast-forwarded by ten commits and then synced with seven additional upstream commits to the current main SHA listed above.
 
 ## Verification results
 

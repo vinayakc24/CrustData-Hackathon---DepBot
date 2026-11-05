@@ -1,4 +1,4 @@
-# DepBot Contract Handoff — v0.5.0
+# DepBot Contract Handoff — v0.5.1
 
 Owner: **Member A**. These contracts are frozen for the first end-to-end demo.
 B and C implement against them; if you need a change, propose it to A (field,
@@ -278,6 +278,10 @@ I1 ripgrep prefilter → I2 libclang USR resolution → I3 compiler probe → I4
 
 ## 7. Change log
 
+- 0.5.1 — additive: remote repositories. `RepositoryRecord.repo_url_or_path` may be a Git URL;
+  `Fleet.resolve_root(repo, sources_dir)` syncs it into `<state_dir>/sources/`, and
+  `select_repositories(..., sources_dir=)` passes that through (without it, remotes are refused as before).
+  `RepositoryUpgradeJob.repo_root` is always a local path (the cache for remotes), so stages are unaffected.
 - 0.5.0 — additive: impact-cascade provenance on `CodeUsage` (`resolved_by`, `resolution_proof`, `resolved_usr`,
   `declaration_file`, `preprocessor_context`), `ResolutionLayer`, `AnalysisMethod.COMPILER_DIAGNOSTIC`,
   `CompilerDiagnostic` + `VerificationResult.diagnostics`, `VerificationPhase.PROBE`, `DepBotState.probe`,
