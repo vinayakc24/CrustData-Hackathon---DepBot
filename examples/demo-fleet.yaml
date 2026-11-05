@@ -1,5 +1,6 @@
 # Demo fleet for the toydep v1 -> v2 migration.
-# Repository paths are relative to this file and point at Member C's fixtures.
+# Repository paths are relative to this file and point at Member C's fixtures
+# (tests/fixtures/toydep/repositories). Build the toydep packages first: see README.
 fleet_id: demo-fleet
 default_policy_id: demo
 policies:
@@ -11,10 +12,10 @@ policies:
 repositories:
   - repository_id: repo_a
     display_name: Repo A (calls old_sum in main.cpp)
-    repo_url_or_path: ../tests/fixtures/repos/repo_a
+    repo_url_or_path: ../tests/fixtures/toydep/repositories/repo_a
   - repository_id: repo_b
     display_name: Repo B (calls old_sum via a helper)
-    repo_url_or_path: ../tests/fixtures/repos/repo_b
+    repo_url_or_path: ../tests/fixtures/toydep/repositories/repo_b
   - repository_id: repo_c
     display_name: Repo C (already on toydep 2.0.0)
-    repo_url_or_path: ../tests/fixtures/repos/repo_c
+    repo_url_or_path: ../tests/fixtures/toydep/repositories/repo_c
