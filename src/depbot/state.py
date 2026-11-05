@@ -65,7 +65,7 @@ _FAIL_ANY = {JobStatus.BLOCKED}
 ALLOWED_TRANSITIONS: dict[JobStatus, set[JobStatus]] = {
     JobStatus.INITIALIZED: {JobStatus.INSPECTED} | _FAIL_ANY,
     JobStatus.INSPECTED: {JobStatus.RESEARCHED, JobStatus.FAILED_RESEARCH} | _FAIL_ANY,
-    JobStatus.RESEARCHED: {JobStatus.IMPACT_ANALYZED} | _FAIL_ANY,
+    JobStatus.RESEARCHED: {JobStatus.IMPACT_ANALYZED, JobStatus.FAILED_MIGRATION} | _FAIL_ANY,
     JobStatus.IMPACT_ANALYZED: {JobStatus.PLANNED, JobStatus.FAILED_MIGRATION} | _FAIL_ANY,
     JobStatus.PLANNED: {JobStatus.PATCHED, JobStatus.FAILED_MIGRATION} | _FAIL_ANY,
     JobStatus.PATCHED: {

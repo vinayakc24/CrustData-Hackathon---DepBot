@@ -111,6 +111,37 @@ Each repo's `conanfile.txt` needs `[generators] CMakeDeps CMakeToolchain` and
 The toydep packages are created locally with `conan create tests/fixtures/toydep/<v>`
 (no network needed).
 
-## 6. Change log
+## 6. How the engine calls you (A's orchestrator, `depbot.orchestrator`)
 
+For each eligible repository the engine:
+
+1. Copies the repo to `artifacts/<run_id>/worktree/` (`.git`, `build/` and caches are
+   skipped), runs `git init` there and commits a baseline on branch `depbot-baseline`,
+   then checks out `depbot/<dep>-<version>`. A dirty source repo is refused. The
+   original checkout is never written.
+2. Detects the adapter, re-validates the declared version, then calls
+   `verify(phase="baseline")`. A baseline that doesn't pass → job BLOCKED.
+3. Calls `research`, then `impact`. Every usage must cite known change IDs and safe paths.
+4. Calls `plan`, then applies the confidence policy gate.
+5. Updates the manifest **itself** through the adapter, then calls `patch` and
+   `apply` for each patch. Patches may touch only planned files (or the
+   registry's `allowed_paths`). The manifest is off-limits to patches.
+6. Calls `verify(phase="upgraded")`; the result maps to VERIFIED / NO_CHANGES_NEEDED / FAILED_*.
+7. Always writes `state.json`, `patches/final.diff`, then calls `report` (best effort).
+
+Notes for C:
+- Baseline and upgraded verification run in the **same** worktree. Delete or
+  re-create `build/` between phases (`build/` and `CMakeUserPresets.json` are git-excluded).
+- `depbot.repository.paths.safe_join(root, rel)` and `is_allowed(rel, allowed)` are
+  available for the patch validator. Prefer them over re-implementing path checks.
+- Repair is not wired in yet. When C's repair engine is ready, A will add an
+  optional `repair` stage to `PipelineStages` (v0.2).
+
+A stage that isn't importable yet makes the job BLOCKED with
+`stage '<name>' not integrated yet` — no fake success.
+
+## 7. Change log
+
+- 0.1.1 — added `RESEARCHED → FAILED_MIGRATION`; documented engine call order, worktree layout,
+  path helpers. `depbot run` / `depbot upgrade` available. No field changes.
 - 0.1.0 — initial contracts (Member A).
