@@ -29,6 +29,9 @@ from depbot.models import (
     RepositoryUpgradeJob,
     UpgradePolicy,
 )
+from depbot.llm.base import LLMError
+from depbot.llm.provider import AnthropicLLMClient
+from depbot.llm.runtime import LLMFactory, fixture_factory
 from depbot.orchestrator import load_default_stages, run_repository_job
 from depbot.package_managers.conan import CONAN_HOME_ENV
 from depbot.package_managers.conan_setup import SetupError, prepare_local_packages
@@ -165,10 +168,36 @@ def cmd_fleet_plan(args: argparse.Namespace) -> int:
     return 0
 
 
+LLM_MODES = ("none", "fixture", "anthropic")
+
+
+def _llm_factory(args: argparse.Namespace) -> LLMFactory | None:
+    """Build the per-job LLM client factory from --llm (or $DEPBOT_LLM). Validated up front."""
+    mode = args.llm or os.environ.get("DEPBOT_LLM") or "none"
+    if mode not in LLM_MODES:
+        raise LLMError(f"unknown LLM mode {mode!r}; choose one of {', '.join(LLM_MODES)}")
+    if mode == "none":
+        return None
+    if mode == "fixture":
+        if not args.llm_fixtures:
+            raise LLMError("--llm fixture requires --llm-fixtures PATH")
+        return fixture_factory(Path(args.llm_fixtures))
+    AnthropicLLMClient.from_env(model=args.llm_model)  # fail fast if no key
+    return lambda: AnthropicLLMClient.from_env(model=args.llm_model)
+
+
+def _add_llm_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--llm", choices=LLM_MODES,
+                        help="LLM provider for bounded stages (default: $DEPBOT_LLM or none)")
+    parser.add_argument("--llm-fixtures", help="JSON {task: response} file for --llm fixture")
+    parser.add_argument("--llm-model", help="model for --llm anthropic (default: $DEPBOT_LLM_MODEL)")
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     """Process one release event across the fleet. Exit 0 only if no job failed/blocked."""
     fleet, state_dir = _load(args)
     event = load_event(Path(args.event))
+    llm_factory = _llm_factory(args)
     try:
         summary = run_fleet(
             event,
@@ -178,6 +207,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             artifacts_root=Path(args.artifacts).resolve(),
             force=args.force,
             create_pr=args.create_pr,
+            llm_factory=llm_factory,
         )
     except DuplicateEvent as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -240,7 +270,10 @@ def cmd_upgrade(args: argparse.Namespace) -> int:
         job_id=event.event_id, event=event, repository=repo, dependency_record=record,
         policy=policy, repo_root=str(root), create_pr=args.create_pr,
     )
-    state, outcome = run_repository_job(job, load_default_stages(), artifacts_root=Path(args.artifacts).resolve())
+    state, outcome = run_repository_job(
+        job, load_default_stages(), artifacts_root=Path(args.artifacts).resolve(),
+        llm_factory=_llm_factory(args),
+    )
     if args.json:
         print(outcome.model_dump_json(indent=2))
     else:
@@ -276,6 +309,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--force", action="store_true", help="reprocess an already-processed event")
     run.add_argument("--artifacts", default="artifacts", help="artifacts root (default: ./artifacts)")
     run.add_argument("--create-pr", action="store_true", help="open GitHub PRs for verified repos")
+    _add_llm_args(run)
     run.set_defaults(func=cmd_run)
 
     up = sub.add_parser("upgrade", help="targeted single-repository upgrade")
@@ -289,6 +323,7 @@ def build_parser() -> argparse.ArgumentParser:
     up.add_argument("--conan-home", help="isolated Conan home (e.g. from `depbot demo setup`)")
     up.add_argument("--create-pr", action="store_true", help="open a GitHub PR if verified")
     up.add_argument("--json", action="store_true")
+    _add_llm_args(up)
     up.set_defaults(func=cmd_upgrade)
 
     demo = sub.add_parser("demo", help="demo helpers").add_subparsers(dest="demo_command", required=True)
@@ -309,7 +344,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     try:
         return args.func(args)
-    except RegistryError as exc:
+    except (RegistryError, LLMError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 

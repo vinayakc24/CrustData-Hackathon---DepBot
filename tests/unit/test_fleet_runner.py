@@ -94,11 +94,12 @@ def test_duplicate_event_refused_unless_forced(fleet_dir):
     assert _run(fleet_dir, _stages(), force=True).repositories_verified == 2
 
 
-def test_cli_run_reports_blocked_until_stages_are_integrated(fleet_dir, capsys):
+def test_cli_run_never_reports_unverified_success(fleet_dir, capsys):
+    # These dummy repos cannot build (no toydep package): real stages must block, not pass.
     code = main(["run", "--fleet", str(fleet_dir / "fleet.yaml"), "--event", str(fleet_dir / "event.yaml"),
                  "--artifacts", str(fleet_dir / "artifacts")])
     out = capsys.readouterr().out
-    assert code == 1 and "BLOCKED" in out and "not integrated yet" in out and "SKIPPED" in out
+    assert code == 1 and "BLOCKED" in out and "SKIPPED" in out and "VERIFIED" not in out
     assert main(["run", "--fleet", str(fleet_dir / "fleet.yaml"), "--event", str(fleet_dir / "event.yaml"),
                  "--artifacts", str(fleet_dir / "artifacts")]) == 3  # duplicate
 
@@ -107,8 +108,8 @@ def test_cli_upgrade_policy_and_noop(fleet_dir, capsys):
     args = ["upgrade", "--repo", str(fleet_dir / "repo_a"), "--dependency", "toydep", "--to", "2.0.0",
             "--artifacts", str(fleet_dir / "art")]
     assert main(args) == 1 and "major upgrades are not allowed" in capsys.readouterr().err
-    assert main(args + ["--approve-major"]) == 1  # blocked: stages not integrated
-    assert "not integrated yet" in capsys.readouterr().out
+    assert main(args + ["--approve-major"]) == 1  # real stages: dummy repo cannot verify
+    assert capsys.readouterr().out.startswith("BLOCKED")
     assert main(["upgrade", "--repo", str(fleet_dir / "repo_c"), "--dependency", "toydep",
                  "--to", "2.0.0"]) == 0
     assert "nothing to do" in capsys.readouterr().out

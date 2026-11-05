@@ -1,4 +1,4 @@
-# DepBot Contract Handoff — v0.3.0
+# DepBot Contract Handoff — v0.4.0
 
 Owner: **Member A**. These contracts are frozen for the first end-to-end demo.
 B and C implement against them; if you need a change, propose it to A (field,
@@ -184,8 +184,49 @@ are available to the report.
 A stage that isn't importable yet makes the job BLOCKED with
 `stage '<name>' not integrated yet` — no fake success.
 
+## 8. LLM runtime — `depbot.llm.runtime` (A owns; B and C consume)
+
+Stage signatures stay frozen. A stage gets the current job's client from the runtime:
+
+```python
+from depbot.llm.base import UNTRUSTED_CONTENT_NOTICE, LLMError, wrap_untrusted
+from depbot.llm.runtime import LLMNotConfigured, get_llm_client, current_llm_client
+
+try:
+    client = get_llm_client()                  # raises LLMNotConfigured if none is bound
+except LLMNotConfigured:
+    ...                                        # deterministic fallback, or StageError(..., blocked=True)
+
+result = client.complete_structured(
+    task="breaking_changes",                   # stable label; also the fixture key
+    system=PROMPT + "\n" + UNTRUSTED_CONTENT_NOTICE,
+    user=wrap_untrusted(changelog_excerpt),
+    schema=MyPydanticModel,                    # response is validated, or LLMError is raised
+)
+```
+
+- **Scoping:** the engine runs every repository job in a copied `contextvars` context and binds a
+  fresh client from the run's factory, so clients never leak between jobs. `current_llm_client()`
+  returns the client or `None`, for optional LLM use.
+- **No client configured:** `get_llm_client()` raises `LLMNotConfigured` (a subclass of `LLMError`).
+  If a stage lets any `LLMError` escape, the job fails with reason `LLM: …`, not as an internal error.
+- **Tests:** `with use_llm_client(FixtureLLMClient({"breaking_changes": {...}})): ...`
+- **Demo / CLI:** `--llm fixture --llm-fixtures path.json` (a `{task: response}` JSON file); each job
+  gets its own `FixtureLLMClient`. The task labels and response shapes are B's (and C's) to define and
+  document; the fixture file belongs next to the demo config.
+- **Production:** `--llm anthropic [--llm-model M]` uses `depbot.llm.provider.AnthropicLLMClient`
+  (stdlib HTTP, key from `LLM_API_KEY` or `ANTHROPIC_API_KEY`, model from `--llm-model` or
+  `$DEPBOT_LLM_MODEL`, default `claude-sonnet-5-5`). The CLI fails fast if no key is set. No tools are
+  offered to the model, and responses must be one JSON document matching the schema.
+- **Default:** `--llm none` (or `$DEPBOT_LLM`). The deterministic demo must work in this mode or with fixtures.
+- `depbot.llm.runtime` imports only `depbot.llm.base`.
+
 ## 7. Change log
 
+- 0.4.0 — additive: `depbot.llm.runtime` (`get_llm_client`, `current_llm_client`, `use_llm_client`,
+  `LLMNotConfigured`, `fixture_factory`), production provider `depbot.llm.provider.AnthropicLLMClient`,
+  CLI `--llm/--llm-fixtures/--llm-model`, and `run_repository_job(..., llm_factory=)` /
+  `run_fleet(..., llm_factory=)`. Stage signatures unchanged.
 - 0.3.0 — additive: `VcpkgAdapter` (manifest mode); `PackageManagerAdapter.cmake_configure_args()`
   and `.environment_problems()` (defaults `[]`, so Conan behaviour is unchanged). The engine now blocks
   a job before any edit if the package-manager tooling is unavailable.

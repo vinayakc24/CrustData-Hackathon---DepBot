@@ -80,6 +80,19 @@ depbot upgrade --repo tests/fixtures/repos/repo_a --dependency toydep --to 2.0.0
   --conan-home examples/.depbot/conan --approve-major
 ```
 
+### LLM provider
+
+Bounded LLM tasks (release interpretation, uncertain impact classification) use the configured provider:
+
+```bash
+--llm none                                   # default: deterministic stages only
+--llm fixture --llm-fixtures demo-llm.json   # recorded responses, offline and reproducible
+--llm anthropic [--llm-model MODEL]          # needs LLM_API_KEY (or ANTHROPIC_API_KEY)
+```
+
+The API key is used only in the provider's request header. It is never passed to builds,
+prompts or logs.
+
 ### GitHub PRs
 
 `--create-pr` (on `run` or `upgrade`) pushes the verified branch to the
