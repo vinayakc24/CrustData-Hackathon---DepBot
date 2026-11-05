@@ -60,10 +60,15 @@ def test_multiple_symbols_deduplicate_and_sort(source_tree: Path) -> None:
 
 
 def test_excludes_non_source_trees(source_tree: Path) -> None:
-    for directory in ("build", "vendor", "generated", ".cache", ".git", "third_party"):
+    for directory in (
+        "build", "vendor", "generated", ".cache", ".git", "third_party",
+        "vcpkg_installed", ".pytest_cache", "__pycache__", ".mypy_cache", ".ruff_cache", "cache",
+    ):
         path = source_tree / directory
         path.mkdir()
         (path / "bad.cpp").write_text("old_sum();\n", encoding="utf-8")
+    (source_tree / "src" / "main.generated.cpp").write_text("old_sum();\n", encoding="utf-8")
+    (source_tree / "src" / "parser.pb.cpp").write_text("old_sum();\n", encoding="utf-8")
     assert len(indexer.search_symbols(source_tree, ["old_sum"])) == 4
 
 

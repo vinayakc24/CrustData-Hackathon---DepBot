@@ -20,6 +20,10 @@ EXCLUDED_GLOBS = (
     "!**/.cache/**", "!vendor/**", "!**/vendor/**", "!generated/**",
     "!**/generated/**", "!third-party/**", "!**/third-party/**", "!third_party/**",
     "!**/third_party/**", "!**/node_modules/**", "!.venv/**", "!**/.venv/**",
+    "!vcpkg_installed/**", "!**/vcpkg_installed/**", "!__pycache__/**",
+    "!**/__pycache__/**", "!.pytest_cache/**", "!**/.pytest_cache/**",
+    "!.mypy_cache/**", "!**/.mypy_cache/**", "!.ruff_cache/**", "!**/.ruff_cache/**",
+    "!cache/**", "!**/cache/**", "!**/*.generated.*", "!**/*_generated.*", "!**/*.pb.*",
 )
 DEFAULT_TIMEOUT_SECONDS = 10.0
 DEFAULT_MAX_OUTPUT_BYTES = 2_000_000
