@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import urllib.error
 import urllib.parse
@@ -96,6 +97,59 @@ def _parse_release(item: object) -> GitHubRelease:
     if not isinstance(prerelease, bool):
         raise GitHubReleaseError("GitHub API release has invalid prerelease flag")
     return GitHubRelease(tag, name, body, url, published, prerelease)
+
+
+def get_latest_github_release(
+    *,
+    upstream_repo: str,
+    timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+    max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
+) -> GitHubRelease:
+    """Retrieve GitHub's latest published stable release for an explicit repo."""
+    repo = _repository_path(upstream_repo)
+    if (
+        isinstance(timeout_seconds, bool)
+        or not isinstance(timeout_seconds, (int, float))
+        or not math.isfinite(timeout_seconds)
+        or timeout_seconds <= 0
+        or isinstance(max_response_bytes, bool)
+        or not isinstance(max_response_bytes, int)
+        or max_response_bytes <= 0
+    ):
+        raise GitHubReleaseError("timeout_seconds and max_response_bytes must be positive and finite")
+
+    request = urllib.request.Request(
+        f"https://api.github.com/repos/{repo}/releases/latest",
+        headers={"Accept": "application/vnd.github+json", "User-Agent": "DepBot-release-research"},
+    )
+    opener = urllib.request.build_opener()
+    try:
+        with opener.open(request, timeout=timeout_seconds) as response:
+            raw = _read_response(response, max_response_bytes)
+    except GitHubReleaseError:
+        raise
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            raise GitHubReleaseError(f"no published stable release found for {repo}") from exc
+        if exc.code == 429 or (exc.code == 403 and exc.headers.get("X-RateLimit-Remaining") == "0"):
+            raise GitHubReleaseError("GitHub API rate limit exceeded") from exc
+        raise GitHubReleaseError(f"GitHub API returned HTTP {exc.code}") from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise GitHubReleaseError(f"GitHub API network failure: {exc}") from exc
+
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise GitHubReleaseError("GitHub API returned invalid JSON or UTF-8") from exc
+    if not isinstance(payload, dict):
+        raise GitHubReleaseError("GitHub API latest-release response must be a JSON object")
+    draft = payload.get("draft")
+    if not isinstance(draft, bool):
+        raise GitHubReleaseError("GitHub API release is missing a valid draft flag")
+    release = _parse_release(payload)
+    if draft or release.prerelease:
+        raise GitHubReleaseError("GitHub latest-release endpoint returned a draft or prerelease")
+    return release
 
 
 def find_github_release(
