@@ -1,0 +1,20 @@
+# Demo fleet for the toydep v1 -> v2 migration.
+# Repository paths are relative to this file and point at Member C's fixtures.
+fleet_id: demo-fleet
+default_policy_id: demo
+policies:
+  demo:
+    # toydep 1.0.0 -> 2.0.0 is a MAJOR change; it still needs `--approve-major`.
+    allowed_change_levels: [patch, minor, major]
+    require_human_approval_for_major: true
+    max_repair_attempts: 2
+repositories:
+  - repository_id: repo_a
+    display_name: Repo A (calls old_sum in main.cpp)
+    repo_url_or_path: ../tests/fixtures/repos/repo_a
+  - repository_id: repo_b
+    display_name: Repo B (calls old_sum via a helper)
+    repo_url_or_path: ../tests/fixtures/repos/repo_b
+  - repository_id: repo_c
+    display_name: Repo C (already on toydep 2.0.0)
+    repo_url_or_path: ../tests/fixtures/repos/repo_c

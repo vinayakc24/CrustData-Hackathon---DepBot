@@ -1,0 +1,9 @@
+event_id: toydep-v2
+dependency_name: toydep
+upstream_repo: local/toydep
+previous_version: 1.0.0
+target_version: 2.0.0
+event_type: release
+source_url: file://tests/fixtures/toydep/2.0.0/CHANGELOG.md
+changelog_path: ../../tests/fixtures/toydep/2.0.0/CHANGELOG.md
+detected_at: "2026-11-05T00:00:00+00:00"
