@@ -51,7 +51,7 @@ def test_verification_runs_release_and_debug_and_records_matrix(tmp_path, monkey
         worktree=tmp_path,
         adapter=adapter,
         phase=VerificationPhase.UPGRADED,
-        policy=UpgradePolicy(require_tests=True),
+        policy=UpgradePolicy(require_tests=True, build_configurations=["Release", "Debug"]),
         artifacts_dir=tmp_path / "artifacts",
     )
 
@@ -122,7 +122,7 @@ def test_debug_failure_fails_verification_even_when_release_passes(tmp_path, mon
         worktree=tmp_path,
         adapter=adapter,
         phase=VerificationPhase.UPGRADED,
-        policy=UpgradePolicy(require_tests=False),
+        policy=UpgradePolicy(require_tests=False, build_configurations=["Release", "Debug"]),
         artifacts_dir=tmp_path / "artifacts",
     )
 
@@ -135,3 +135,34 @@ def test_debug_failure_fails_verification_even_when_release_passes(tmp_path, mon
     )
     assert matrix["configurations"]["Release"]["passed"] is True
     assert matrix["configurations"]["Debug"]["passed"] is False
+
+
+def test_default_policy_builds_release_only_and_debug_only_is_allowed(tmp_path, monkeypatch):
+    import pytest
+    from pydantic import ValidationError
+
+    import depbot.verification.pipeline as pipeline
+
+    def ok(*, label, args, worktree, **_kwargs):
+        if label.endswith("configure"):
+            Path(args[args.index("-B") + 1]).mkdir(parents=True, exist_ok=True)
+        return CommandResult(command_label=label, args=args, cwd=str(worktree), exit_code=0, duration_seconds=0.01,
+                             stdout_tail="1 test passed out of 1" if label.endswith(".tests") else "")
+
+    installs = []
+    monkeypatch.setattr(pipeline, "_run_step", ok)
+    monkeypatch.setattr(pipeline, "run_command", lambda **kw: installs.append(kw["args"]) or CommandResult(
+        command_label=kw["command_label"], args=kw["args"], cwd=str(kw["cwd"]), exit_code=0, duration_seconds=0.01))
+    adapter = SimpleNamespace(command_env=lambda: {}, cmake_preset=lambda *, build_type: None,
+                              install_args=lambda _r, *, build_type: ["pkg", "install", build_type],
+                              cmake_configure_args=lambda _r, *, build_type: [])
+    for policy, expected in ((UpgradePolicy(), ["Release"]), (UpgradePolicy(build_configurations=["Debug"]), ["Debug"])):
+        installs.clear()
+        result = run_verification(worktree=tmp_path, adapter=adapter, phase=VerificationPhase.BASELINE,
+                                  policy=policy, artifacts_dir=tmp_path / "a")
+        assert result.passed and [args[-1] for args in installs] == expected
+        assert result.build.args[-3] == expected[0]  # legacy fields describe the configuration that ran
+    with pytest.raises(ValidationError):
+        UpgradePolicy(build_configurations=[])
+    with pytest.raises(ValidationError):
+        UpgradePolicy(build_configurations=["Release", "Release"])

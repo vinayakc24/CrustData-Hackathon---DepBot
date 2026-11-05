@@ -152,12 +152,12 @@ def run_verification(
     policy: UpgradePolicy,
     artifacts_dir: Path,
 ) -> VerificationResult:
-    """Run the isolated Debug and Release CMake verification configurations.
+    """Run each CMake configuration in ``policy.build_configurations`` (default Release).
 
-    The frozen ``VerificationResult`` schema exposes one set of command fields,
-    which continues to describe Release for compatibility. Full per-configuration
-    evidence is written to ``verification/<phase>/configuration-matrix.json``.
-    The phase passes only if both configurations pass.
+    The frozen ``VerificationResult`` schema exposes one set of command fields: the
+    first failing configuration's, otherwise Release's (or the only one's). Full
+    per-configuration evidence is written to ``verification/<phase>/configuration-matrix.json``.
+    The phase passes only if every configuration passes.
     """
     worktree = worktree.resolve()
     # Clear stale caches from the prior verification phase, then retain both
@@ -165,7 +165,7 @@ def run_verification(
     _reset_build_dir(worktree)
     extra_env = minimal_env(adapter.command_env())
     configurations: dict[str, dict] = {}
-    for build_type in ("Release", "Debug"):
+    for build_type in policy.build_configurations:
         # Conan and CMake generate configuration-specific toolchains/presets.
         configurations[build_type] = _run_configuration(
             worktree=worktree,
@@ -206,9 +206,10 @@ def run_verification(
     # Keep the contract's legacy fields tied to Release when it passes. If one
     # configuration fails, expose that failure in the legacy fields so existing
     # outcome classification and repair logic see the actual failing command.
+    primary = configurations.get("Release") or next(iter(configurations.values()))
     selected = next(
         (item for item in configurations.values() if not item["passed"]),
-        configurations["Release"],
+        primary,
     )
     results = selected["results"]
     tests_passed = selected["tests_passed"]
