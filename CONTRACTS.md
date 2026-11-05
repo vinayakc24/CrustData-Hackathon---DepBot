@@ -1,4 +1,4 @@
-# DepBot Contract Handoff — v0.1.0
+# DepBot Contract Handoff — v0.2.0
 
 Owner: **Member A**. These contracts are frozen for the first end-to-end demo.
 B and C implement against them; if you need a change, propose it to A (field,
@@ -132,16 +132,42 @@ For each eligible repository the engine:
 Notes for C:
 - Baseline and upgraded verification run in the **same** worktree. Delete or
   re-create `build/` between phases (`build/` and `CMakeUserPresets.json` are git-excluded).
+- **Run every install/configure/build/test command with
+  `env=minimal_env(adapter.command_env())`** (`from depbot.package_managers.base import minimal_env`).
+  This passes the isolated `CONAN_HOME` created by `depbot demo setup` and keeps tokens and API keys
+  out of builds. Verified: with that env, `adapter.install_args()` resolves toydep offline.
 - `depbot.repository.paths.safe_join(root, rel)` and `is_allowed(rel, allowed)` are
   available for the patch validator. Prefer them over re-implementing path checks.
-- Repair is not wired in yet. When C's repair engine is ready, A will add an
-  optional `repair` stage to `PipelineStages` (v0.2).
+
+### Repair stage (v0.2, optional) — C implements, A wires
+
+`depbot.verification.repair_engine.propose_repair(*, worktree, state, failure, attempt) -> list[SourcePatch]`
+
+- Called only after an upgraded FAILED_BUILD / FAILED_TESTS while `repair_attempts < max_repair_attempts`.
+- `failure` is the failing `VerificationResult`; set its `failure_category` from your error classifier.
+- Return targeted patches, or `[]` to give up. Do not run commands. The engine applies them through
+  `validate_and_apply` (same scope rules), then re-runs the full upgraded verification.
+- A patch whose diff was already applied is refused. Every repair patch is saved under `patches/`.
+- If the module doesn't exist, repair is simply disabled; the job is not blocked.
+
+### Delivery (A)
+
+After VERIFIED or NO_CHANGES_NEEDED the engine writes `pr/pr-body.md` and `pr/pr.json` (local PR
+artifact, built only from recorded evidence) when the pre-PR gate allows. With `create_pr=True`
+it pushes the branch to the source's GitHub `origin` and runs `gh pr create` (no merge).
+C's `write_repository_report` runs after this, so `state.pr_url` / `state.repo_facts["pull_request"]`
+are available to the report.
 
 A stage that isn't importable yet makes the job BLOCKED with
 `stage '<name>' not integrated yet` — no fake success.
 
 ## 7. Change log
 
+- 0.2.0 — additive only, nothing existing changed:
+  `PipelineStages.repair` (optional `RepairStage`); `RepositoryUpgradeJob.create_pr: bool = False`;
+  `PackageManagerAdapter.command_env()` + `minimal_env()`; working copies of Git-root repos are now
+  local clones sharing the source history (`repo_facts["working_copy"]["mode"] == "clone"`), with
+  subdirectory fixtures still snapshot-copied.
 - 0.1.1 — added `RESEARCHED → FAILED_MIGRATION`; documented engine call order, worktree layout,
   path helpers. `depbot run` / `depbot upgrade` available. No field changes.
 - 0.1.0 — initial contracts (Member A).

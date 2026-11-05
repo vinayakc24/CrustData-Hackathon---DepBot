@@ -28,6 +28,20 @@ def is_git_tracked(root: Path) -> bool:
     return proc is not None and proc.returncode == 0 and proc.stdout.strip() == "true"
 
 
+def toplevel(root: Path) -> Path | None:
+    proc = _git(root, "rev-parse", "--show-toplevel")
+    if proc is None or proc.returncode != 0:
+        return None
+    return Path(proc.stdout.strip()).resolve()
+
+
+def current_branch(root: Path) -> str | None:
+    proc = _git(root, "rev-parse", "--abbrev-ref", "HEAD")
+    if proc is None or proc.returncode != 0 or proc.stdout.strip() in ("", "HEAD"):
+        return None
+    return proc.stdout.strip()
+
+
 def head_commit(root: Path) -> str | None:
     proc = _git(root, "rev-parse", "HEAD")
     if proc is None or proc.returncode != 0:

@@ -125,6 +125,26 @@ class ReportStage(Protocol):
     def __call__(self, *, state: DepBotState, artifacts_dir: Path) -> Path: ...
 
 
+class RepairStage(Protocol):
+    """depbot.verification.repair_engine.propose_repair  (optional, contract v0.2)
+
+    Called after a FAILED_BUILD / FAILED_TESTS upgraded verification while repair
+    attempts remain. Classify ``failure`` and return targeted source patches for
+    the next attempt, or ``[]`` to give up. Must not run commands: the engine
+    applies the patches through ``ApplyStage`` and re-runs full verification.
+    ``attempt`` is 1-based. ``state`` is read-only for the stage.
+    """
+
+    def __call__(
+        self,
+        *,
+        worktree: Path,
+        state: DepBotState,
+        failure: VerificationResult,
+        attempt: int,
+    ) -> list[SourcePatch]: ...
+
+
 @dataclass(frozen=True)
 class PipelineStages:
     """The stage callables one repository job uses. Injected so tests and the
@@ -137,3 +157,4 @@ class PipelineStages:
     apply: ApplyStage
     verify: VerifyStage
     report: ReportStage
+    repair: RepairStage | None = None  # None: build/test failures are terminal

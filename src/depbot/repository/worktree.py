@@ -16,7 +16,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from depbot.repository.git_info import dirty_paths, head_commit
+from depbot.repository.git_info import current_branch, dirty_paths, head_commit, toplevel
 
 GIT_TIMEOUT_SECONDS = 60
 # Directory/file names never copied into a working copy.
@@ -45,8 +45,10 @@ class WorkingCopy(BaseModel):
     branch: str
     base_branch: str = "depbot-baseline"
     source_commit: str | None
+    source_branch: str | None = None
     baseline_commit: str
     version_controlled: bool
+    mode: str = "snapshot"  # "clone" (shares source history) or "snapshot"
     notes: list[str] = Field(default_factory=list)
 
 
@@ -114,26 +116,40 @@ def prepare_working_copy(
 
     _check_symlinks(source)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(source, dest, symlinks=True, ignore=_ignore)
-
-    _git(dest, "init", "-q", "-b", "depbot-baseline")
+    is_repo_root = dirty is not None and toplevel(source) == source and head_commit(source)
+    if is_repo_root:
+        # Clone the committed source so the working branch shares its history
+        # (required for real PRs). Drop the remote: nothing is pushed back to the source.
+        _git(dest.parent, "clone", "-q", "--no-hardlinks", "--", str(source), str(dest))
+        _git(dest, "remote", "remove", "origin")
+        _git(dest, "branch", "depbot-baseline", "HEAD")
+        mode = "clone"
+    else:
+        # Subdirectory of a larger repo (e.g. test fixtures) or not under Git: snapshot copy.
+        shutil.copytree(source, dest, symlinks=True, ignore=_ignore)
+        _git(dest, "init", "-q", "-b", "depbot-baseline")
+        mode = "snapshot"
     # Build outputs created later must never show up as DepBot edits.
     (dest / ".git" / "info").mkdir(parents=True, exist_ok=True)
     (dest / ".git" / "info" / "exclude").write_text(
         "\n".join(["build/", "cmake-build-*/", "CMakeUserPresets.json", ".cache/", ""]),
         encoding="utf-8",
     )
-    _git(dest, "add", "-A")
-    _git(dest, "commit", "-q", "--allow-empty", "-m", "DepBot baseline snapshot")
-    baseline = _git(dest, "rev-parse", "HEAD")
+    if mode == "snapshot":
+        _git(dest, "add", "-A")
+        _git(dest, "commit", "-q", "--allow-empty", "-m", "DepBot baseline snapshot")
+    baseline = _git(dest, "rev-parse", "depbot-baseline")
     _git(dest, "checkout", "-q", "-b", branch)
+    notes.append(f"working copy mode: {mode}")
     return WorkingCopy(
         source_root=str(source),
         path=str(dest),
         branch=branch,
         source_commit=head_commit(source),
+        source_branch=current_branch(source) if dirty is not None else None,
         baseline_commit=baseline,
         version_controlled=dirty is not None,
+        mode=mode,
         notes=notes,
     )
 

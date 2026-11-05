@@ -36,7 +36,9 @@ class DuplicateEvent(RuntimeError):
     pass
 
 
-def _job_for(event: ReleaseEvent, sel: RepositorySelection, fleet: Fleet) -> RepositoryUpgradeJob:
+def _job_for(
+    event: ReleaseEvent, sel: RepositorySelection, fleet: Fleet, create_pr: bool
+) -> RepositoryUpgradeJob:
     assert sel.dependency_record is not None and sel.repo_root is not None
     return RepositoryUpgradeJob(
         job_id=f"{event.event_id}:{sel.repository.repository_id}",
@@ -45,14 +47,17 @@ def _job_for(event: ReleaseEvent, sel: RepositorySelection, fleet: Fleet) -> Rep
         dependency_record=sel.dependency_record,
         policy=fleet.policy_for(sel.repository),
         repo_root=sel.repo_root,
+        create_pr=create_pr,
     )
 
 
 def _run_one(
-    event: ReleaseEvent, sel: RepositorySelection, fleet: Fleet, stages: PipelineStages, artifacts_root: Path
+    event: ReleaseEvent, sel: RepositorySelection, fleet: Fleet, stages: PipelineStages,
+    artifacts_root: Path, create_pr: bool,
 ) -> RepositoryUpgradeOutcome:
     try:
-        _, outcome = run_repository_job(_job_for(event, sel, fleet), stages, artifacts_root=artifacts_root)
+        job = _job_for(event, sel, fleet, create_pr)
+        _, outcome = run_repository_job(job, stages, artifacts_root=artifacts_root)
         return outcome
     except Exception as exc:  # isolate: never let one repository stop the fleet
         log.exception("fleet job for %s crashed", sel.repository.repository_id)
@@ -75,6 +80,7 @@ def run_fleet(
     state_dir: Path,
     artifacts_root: Path,
     force: bool = False,
+    create_pr: bool = False,
 ) -> FleetRunSummary:
     events = EventLog(state_dir / "events.json")
     duplicate = events.find_duplicate(event)
@@ -97,7 +103,7 @@ def run_fleet(
     for sel in selections:
         if sel.eligible:
             log.info("running job for %s", sel.repository.repository_id)
-            outcomes.append(_run_one(event, sel, fleet, stages, artifacts_root))
+            outcomes.append(_run_one(event, sel, fleet, stages, artifacts_root, create_pr))
         else:
             outcomes.append(sel.to_outcome(event))
 
