@@ -23,7 +23,7 @@ upgrade-report.md includes the recorded GitHub PR publication state and note, po
 
 ## Validation
 
-These focused checks were rerun against the local validation snapshot synced to upstream `1b1a1de`. Two upstream commits then changed orchestrator.py and models.py; those changes are included in this PR but were not rerun through tests. The PR branch is synced to current main `29eef91b76d9325370539987c9f4c43f1d99888d`.
+These focused checks were rerun after syncing the local validation snapshot and PR branch to current upstream main (`29eef91b76d9325370539987c9f4c43f1d99888d`). The real Conan/CMake-dependent tests remain skipped because the required tools are unavailable.
 
 - tests/unit/test_verification_reporting_knowledge.py: **12 passed**.
 - Focused orchestrator scenarios covering happy path, baseline failure, upgraded test failure, successful repair, and repair give-up: **5 passed**.

@@ -98,7 +98,7 @@ The latest focused rerun after the vcpkg configure-argument fix used `-rs`: 17 p
 
 ### Follow-up validation
 
-After syncing to current upstream main (`29eef91b76d9325370539987c9f4c43f1d99888d`), the focused checks below were rerun against the refreshed source snapshot at 1b1a1de. Two more upstream commits later changed orchestrator.py and models.py; those changes are now included in the PR, but have not yet been rerun through tests. The Conan/CMake-dependent commands remain skipped because those executables are not installed.
+After syncing to current upstream main (`29eef91b76d9325370539987c9f4c43f1d99888d`), the focused checks below were rerun against the refreshed source snapshot at that base. The Conan/CMake-dependent commands remain skipped because those executables are not installed.
 
 | Check | Result |
 |---|---|
