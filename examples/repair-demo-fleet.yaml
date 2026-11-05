@@ -1,0 +1,21 @@
+# Repair demo: the probe build is disabled, so a usage the impact analysis cannot
+# see is only discovered by the upgraded build — and the bounded repair loop.
+#   repo_d: old_sum hidden in src/calls.inc (not an indexed extension) -> repaired, VERIFIED
+#   repo_e: old_sum produced by macro token-pasting                     -> repair declines, FAILED
+fleet_id: repair-demo
+default_policy_id: repair
+policies:
+  repair:
+    allowed_change_levels: [patch, minor, major]
+    require_human_approval_for_major: true
+    run_probe_build: false
+    max_repair_attempts: 2
+repositories:
+  - repository_id: repo_d
+    display_name: Repo D (old_sum in a .inc include)
+    repo_url_or_path: ../tests/fixtures/toydep/repositories/repo_d
+    allowed_paths: [src]
+  - repository_id: repo_e
+    display_name: Repo E (old_sum via token pasting)
+    repo_url_or_path: ../tests/fixtures/toydep/repositories/repo_e
+    allowed_paths: [src]

@@ -446,14 +446,24 @@ def _apply_probe_layer(root: Path, artifacts_dir: Path, usages: list[CodeUsage],
             snippet = (root / rel).read_text(encoding="utf-8", errors="replace").splitlines()[line - 1].strip()[:1000]
         except (OSError, IndexError):
             snippet = ""
+        symbol = next((s.rsplit("::", 1)[-1] for c in changes for s in c.affected_symbols
+                       if s.rsplit("::", 1)[-1] in message), "<unexplained>")
+        # Compiler-proven and the changed symbol is literally on the line: a usage the earlier
+        # layers missed (e.g. a file type the text index skips) — safe to migrate.
+        on_line = bool(related) and re.search(
+            rf"(?<![A-Za-z0-9_]){re.escape(symbol)}(?![A-Za-z0-9_])", snippet) is not None
+        if not related:
+            proof = f"probe build error not explained by any known breaking change: {message}"
+        elif on_line:
+            proof = f"probe build error at a usage earlier layers missed: {message}"
+        else:
+            proof = f"probe build error names {symbol} but it is not on this line (macro expansion?): {message}"
         result.append(CodeUsage(
-            symbol=next((s.rsplit("::", 1)[-1] for c in changes for s in c.affected_symbols
-                         if s.rsplit("::", 1)[-1] in message), "<unexplained>"),
-            file_path=rel, line_start=line, line_end=line, snippet=snippet or message[:200],
-            analysis_method=AnalysisMethod.COMPILER_DIAGNOSTIC, impact=ImpactLevel.UNKNOWN,
-            related_change_ids=related, confidence=0.5, resolved_by=ResolutionLayer.COMPILER_PROBE,
-            resolution_proof=(f"probe build error not explained by any known breaking change: {message}"
-                              if not related else f"probe build error: {message}")[:500],
+            symbol=symbol, file_path=rel, line_start=line, line_end=line, snippet=snippet or message[:200],
+            analysis_method=AnalysisMethod.COMPILER_DIAGNOSTIC,
+            impact=ImpactLevel.DEFINITE if on_line else ImpactLevel.UNKNOWN,
+            related_change_ids=related, confidence=0.97 if on_line else 0.5,
+            resolved_by=ResolutionLayer.COMPILER_PROBE, resolution_proof=proof[:500],
         ))
         added += 1
     stats["probe"] = {"errors": len(errors), "confirmed": confirmed, "unexplained_added": added}
