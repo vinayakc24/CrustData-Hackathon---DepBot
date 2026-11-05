@@ -1,0 +1,11 @@
+# Same toydep 1.0.0 -> 2.0.0 release, but the notes are prose that DepBot's changelog
+# rules cannot parse ("is gone", "switch to"). Without an LLM the job stops for human
+# review; with --llm gemini|anthropic, R3 extracts old_sum -> sum from the quoted text.
+event_id: toydep-v2-prose
+dependency_name: toydep
+upstream_repo: local/toydep
+previous_version: 1.0.0
+target_version: 2.0.0
+event_type: release
+changelog_path: ../../tests/fixtures/toydep/release-notes-2.0.0-prose.md
+detected_at: "2026-11-06T00:00:00+00:00"
