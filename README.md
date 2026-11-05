@@ -31,7 +31,7 @@ that depend on the local toy library `toydep`:
 | `repo_b` | `old_sum` at another call site, toydep 1.0.0 | migrated + verified |
 | `repo_c` | already on toydep 2.0.0 | skipped, no job/LLM/build |
 
-toydep 2.0.0 removes `old_sum` in favour of `sum` (see its `CHANGELOG.md`).
+toydep 2.0.0 removes `old_sum` in favour of `sum` (see `tests/fixtures/toydep/release-notes-2.0.0.md`).
 
 ```bash
 # 1. Build toydep 1.0.0 and 2.0.0 into an isolated, offline Conan home
