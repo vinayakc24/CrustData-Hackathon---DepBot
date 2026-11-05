@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+.env
+build/
+dist/
+artifacts/*
+!artifacts/.gitkeep
+.depbot/
+CMakeUserPresets.json
