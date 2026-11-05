@@ -153,6 +153,13 @@ after the pre-PR policy gate passes, and it never auto-merges.
 Without `--create-pr`, or for repositories without a GitHub remote, DepBot
 writes a clearly labelled local PR artifact instead.
 
+## Demo B: a real upstream upgrade ({fmt} 6.2.1 → 7.0.0)
+
+A service with a custom `fmt::formatter` breaks on fmt 7.0.0, which removed
+`fmt::parse_context`. DepBot builds both real fmt releases offline, reads the upstream
+changelog, confirms the usage with libclang, patches it and verifies with `ctest`.
+Runbook: [`examples/real-fmt/README.md`](examples/real-fmt/README.md).
+
 ## How DepBot decides what changed and where
 
 Deterministic layers settle everything they can prove before an LLM is consulted:

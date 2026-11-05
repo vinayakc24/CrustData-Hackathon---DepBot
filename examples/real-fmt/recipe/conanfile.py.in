@@ -1,0 +1,36 @@
+# Minimal offline recipe for {fmt} built from an upstream release tag.
+# prepare.sh copies this next to the fmt sources as conanfile.py, with @VERSION@ filled in.
+from conan import ConanFile
+from conan.tools.cmake import CMake, CMakeToolchain, cmake_layout
+
+
+class FmtConan(ConanFile):
+    name = "fmt"
+    version = "@VERSION@"
+    settings = "os", "arch", "compiler", "build_type"
+    exports_sources = "CMakeLists.txt", "include/*", "src/*", "support/*", "*.rst", "*.md", "LICENSE*"
+
+    def layout(self):
+        cmake_layout(self)
+
+    def generate(self):
+        tc = CMakeToolchain(self)
+        tc.cache_variables["FMT_DOC"] = "OFF"
+        tc.cache_variables["FMT_TEST"] = "OFF"
+        tc.cache_variables["FMT_INSTALL"] = "ON"
+        # fmt 6/7 declare cmake_minimum_required(VERSION 3.1); CMake >= 4 needs this.
+        tc.cache_variables["CMAKE_POLICY_VERSION_MINIMUM"] = "3.5"
+        tc.generate()
+
+    def build(self):
+        cmake = CMake(self)
+        cmake.configure()
+        cmake.build()
+
+    def package(self):
+        CMake(self).install()
+
+    def package_info(self):
+        self.cpp_info.libs = ["fmt"]
+        self.cpp_info.set_property("cmake_file_name", "fmt")
+        self.cpp_info.set_property("cmake_target_name", "fmt::fmt")

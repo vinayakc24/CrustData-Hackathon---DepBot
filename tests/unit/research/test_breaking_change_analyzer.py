@@ -165,3 +165,46 @@ def test_default_stage_loader_resolves_research_implementation() -> None:
     stages = load_default_stages()
 
     assert stages.research.__module__ == "depbot.research.breaking_change_analyzer"
+
+
+# Verbatim excerpt of fmt's changelog (doc/ChangeLog-old.md, "7.0.0 - 2020-07-05").
+FMT_7_EXCERPT = """\
+# 7.0.0 - 2020-07-05
+
+- Removed the following deprecated APIs:
+
+  -   `FMT_STRING_ALIAS` and `fmt` macros - replaced by `FMT_STRING`
+  -   `fmt::basic_string_view::char_type` - replaced by
+      `fmt::basic_string_view::value_type`
+  -   `convert_to_int`
+  -   `format_arg_store::types`
+  -   `*parse_context` - replaced by `*format_parse_context`
+
+# 6.2.1 - 2020-05-09
+
+- Fixed ostream support in `sprintf`.
+"""
+
+
+def test_list_item_replacements_from_real_fmt_changelog(tmp_path: Path) -> None:
+    notes = tmp_path / "ChangeLog.md"
+    notes.write_text(FMT_7_EXCERPT)
+    event = ReleaseEvent(event_id="fmt-7", dependency_name="fmt", upstream_repo="fmtlib/fmt",
+                         previous_version="6.2.1", target_version="7.0.0", changelog_path=str(notes))
+    dependency = Dependency(name="fmt", current_version="6.2.1", target_version="7.0.0",
+                            package_manager=PackageManagerName.CONAN, manifest_path="conanfile.txt")
+    changes = research_release(event=event, dependency=dependency, artifacts_dir=tmp_path / "a")
+    mapped = {c.affected_symbols[0]: c.replacement_symbols for c in changes if c.replacement_symbols}
+    assert mapped["parse_context"] == ["format_parse_context"]  # `*` wildcard prefix stripped
+    assert mapped["char_type"] == ["value_type"]  # replacement wrapped onto the next line
+    assert all(c.evidence_excerpt in FMT_7_EXCERPT for c in changes if c.replacement_symbols)
+    assert "sprintf" not in mapped  # 6.2.1 section is outside (6.2.1, 7.0.0]
+
+
+def test_use_instead_list_phrasing(tmp_path: Path) -> None:
+    notes = tmp_path / "notes.md"
+    notes.write_text("# 2.0.0\n\n- Removed deprecated APIs:\n  - `has_formatter`: use `is_formattable` instead,\n")
+    event, dependency = _inputs(notes)
+    changes = research_release(event=event, dependency=dependency, artifacts_dir=tmp_path / "a")
+    assert [(c.affected_symbols, c.replacement_symbols) for c in changes if c.replacement_symbols] == [
+        (["has_formatter"], ["is_formattable"])]

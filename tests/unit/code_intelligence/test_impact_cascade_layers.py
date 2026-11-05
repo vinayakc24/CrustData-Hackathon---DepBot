@@ -113,3 +113,45 @@ def test_without_compile_database_text_behaviour_is_unchanged(tmp_path):
     assert usage.impact == ImpactLevel.DEFINITE and usage.resolved_by == ResolutionLayer.TEXT_PREFILTER
     stats = json.loads((tmp_path / "art" / "impact_layers.json").read_text())
     assert stats["ast"] == "skipped: no baseline compile database"
+
+
+ALIAS_HEADER = """\
+#pragma once
+namespace fmt { inline namespace v6 {
+template <typename Char> class basic_format_parse_context {};
+using format_parse_context = basic_format_parse_context<char>;
+using parse_context [[deprecated]] = basic_format_parse_context<char>;
+}}
+"""
+ALIAS_SOURCE = """\
+#include <fmt/core.h>
+namespace mine { struct parse_context {}; }
+struct F {
+  void parse(fmt::parse_context& ctx);
+  void other(mine::parse_context& ctx);
+};
+"""
+
+
+@needs_clang
+def test_type_alias_uses_resolve_through_type_refs(tmp_path):
+    """fmt 7: `parse_context` (an alias) removed — TYPE_REF cursors are spelled qualified."""
+    dep = tmp_path / "conan" / "fmt" / "include" / "fmt"
+    dep.mkdir(parents=True)
+    (dep / "core.h").write_text(ALIAS_HEADER)
+    wt = tmp_path / "worktree"
+    (wt / "src").mkdir(parents=True)
+    (wt / "src" / "main.cpp").write_text(ALIAS_SOURCE)
+    art = tmp_path / "artifacts"
+    art.mkdir()
+    (art / "compile_commands.baseline.json").write_text(json.dumps([{
+        "directory": str(wt / "build"), "file": str(wt / "src" / "main.cpp"),
+        "arguments": ["c++", "-std=c++17", "-isystem", str(dep.parent), "-c", str(wt / "src" / "main.cpp")]}]))
+    change = BreakingChange(id="fmt-7.0.0-BC3", title="parse_context removed", change_type=ChangeType.REMOVED,
+                            affected_symbols=["parse_context"], replacement_symbols=["format_parse_context"],
+                            migration_advice="use format_parse_context", evidence_urls=["file:///c.md"],
+                            confidence=0.95)
+    lines = _by_line(find_impacted_usages(worktree=wt, changes=[change], artifacts_dir=art))
+    assert lines[4].impact == ImpactLevel.DEFINITE and lines[4].resolved_by == ResolutionLayer.CLANG_AST
+    assert lines[4].resolved_usr == "c:@N@fmt@N@v6@parse_context"
+    assert lines[5].impact == ImpactLevel.UNAFFECTED  # mine::parse_context is a different entity

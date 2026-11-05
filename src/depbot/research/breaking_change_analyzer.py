@@ -47,6 +47,13 @@ _REPLACEMENT = re.compile(
     + _API.format(name="new")
     + r"`"
 )
+# List-item style used by real changelogs (e.g. fmt 7.0.0, 12.0.0):
+#   - `*parse_context` - replaced by `*format_parse_context`
+#   - `has_formatter`: use `is_formattable` instead
+_ITEM_REPLACEMENT = re.compile(
+    r"`\*?(?P<old>[A-Za-z_~][\w:~]*)`\s*(?:-|–|—|:)\s*(?:(?:was\s+)?replaced\s+(?:by|with)|use)\s+"
+    r"`\*?(?P<new>[A-Za-z_~][\w:~]*)`(?:\s+instead)?"
+)
 _RISK_WORDS = re.compile(r"(?i)\b(?:breaking|removed|renamed|incompatible)\b")
 _INSTRUCTION_TEXT = re.compile(
     r"(?i)\b(?:ignore\s+(?:all\s+)?(?:prior|previous|above)|follow\s+these\s+instructions|"
@@ -152,6 +159,27 @@ def _deterministic_changes(
         excerpt = match.group(0).strip()
         # Avoid turning prompt-injection text into even an ``unknown`` claim.
         if _INSTRUCTION_TEXT.search(excerpt):
+            continue
+        items = list(_ITEM_REPLACEMENT.finditer(excerpt))
+        if items:
+            for item in items:
+                old, new = _symbol(item.group("old")), _symbol(item.group("new"))
+                key = (ChangeType.REMOVED, old, item.group(0))
+                if key in seen or old == new:
+                    continue
+                seen.add(key)
+                findings.append(BreakingChange(
+                    id=f"{dependency.name}-{event.target_version}-BC{len(findings) + 1}",
+                    title=f"{old} was removed; replaced by {new}",
+                    change_type=ChangeType.REMOVED,
+                    affected_symbols=[old],
+                    replacement_symbols=[new],
+                    migration_advice=f"Replace {old} with {new}.",
+                    evidence_urls=[source_url],
+                    evidence_excerpt=item.group(0),
+                    confidence=0.95,
+                    source=ChangeSource.CHANGELOG_RULE,
+                ))
             continue
         removal = _REMOVAL.search(excerpt)
         rename = _RENAME.search(excerpt)
