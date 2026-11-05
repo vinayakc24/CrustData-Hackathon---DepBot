@@ -29,9 +29,10 @@ from depbot.reporting.evidence_collector import collect_evidence
 from depbot.reporting.report_generator import write_repository_report
 from depbot.migration.planner import plan_migration
 from depbot.state import DepBotState, JobStatus
+from depbot.package_managers.base import minimal_env
 from depbot.verification.command_runner import MAX_LOG_BYTES, run_command
 from depbot.verification.error_classifier import classify_failure
-from depbot.verification.pipeline import run_verification
+from depbot.verification.pipeline import _test_counts, run_verification
 from depbot.verification.repair_engine import propose_repair
 
 
@@ -76,6 +77,7 @@ def test_command_runner_times_out_and_caps_logs(tmp_path: Path):
         cwd=tmp_path, artifacts_dir=tmp_path / "logs", timeout_seconds=0.1,
     )
     assert timeout.timed_out
+    assert timeout.exit_code is None
     assert not timeout.succeeded
 
     noisy = run_command(
@@ -213,11 +215,80 @@ def test_repair_declines_test_regressions(tmp_path: Path):
         worktree=Path(state.worktree_path), state=state, failure=failure, attempt=1
     )
 
-def test_verification_includes_adapter_cmake_configure_args(tmp_path: Path, monkeypatch):
-    captured: list[tuple[str, list[str]]] = []
 
-    def successful_step(*, label, args, worktree, **_kwargs):
-        captured.append((label, args))
+def test_upgrade_report_contains_only_recorded_pr_policy_repair_and_test_evidence(tmp_path: Path):
+    state = _state(tmp_path)
+    state.repo_facts["pull_request"] = {
+        "published": False,
+        "publish_note": "local PR artifact only; not published to GitHub",
+    }
+    state.policy_decisions = [{"allowed": True, "reasons": ["recorded decision"]}]
+    state.repair_attempt_details = [{
+        "attempt": 1,
+        "patches": [{
+            "patch_id": "repair-1",
+            "paths": ["src/main.cpp"],
+            "artifact_path": str(Path(state.artifacts_dir) / "patches" / "repair-1.diff"),
+            "status": "applied",
+            "rejection_reason": None,
+        }],
+    }]
+    baseline_commands = [
+        CommandResult(command_label=f"baseline.{stage}", args=[stage], cwd=state.worktree_path,
+                      exit_code=0, duration_seconds=0.01)
+        for stage in ("install", "configure", "build", "tests")
+    ]
+    state.baseline = VerificationResult(
+        phase=VerificationPhase.BASELINE,
+        dependency_install=baseline_commands[0],
+        configure=baseline_commands[1],
+        build=baseline_commands[2],
+        tests=baseline_commands[3],
+        tests_passed=2,
+        tests_failed=0,
+        passed=True,
+    )
+    state.verification = VerificationResult(
+        phase=VerificationPhase.UPGRADED,
+        dependency_install=CommandResult(command_label="upgraded.install", args=["install"],
+                                         cwd=state.worktree_path, exit_code=0, duration_seconds=0.01),
+        configure=CommandResult(command_label="upgraded.configure", args=["configure"],
+                                cwd=state.worktree_path, exit_code=0, duration_seconds=0.01),
+        build=CommandResult(command_label="upgraded.build", args=["build"],
+                            cwd=state.worktree_path, exit_code=0, duration_seconds=0.01),
+        tests=CommandResult(command_label="upgraded.tests", args=["ctest"],
+                            cwd=state.worktree_path, exit_code=8, duration_seconds=0.01),
+        tests_passed=1,
+        tests_failed=1,
+        failed_test_names=["regression_case"],
+        passed=False,
+    )
+
+    report_path = write_repository_report(state=state, artifacts_dir=tmp_path / "artifacts")
+    report = report_path.read_text(encoding="utf-8")
+    evidence = json.loads((tmp_path / "artifacts" / "evidence.json").read_text(encoding="utf-8"))
+
+    assert report_path.name == "upgrade-report.md"
+    assert (tmp_path / "artifacts" / "repository-report.md").is_file()
+    assert "Published to GitHub: **False**" in report
+    assert "local PR artifact only; not published to GitHub" in report
+    assert '"allowed": true' in report
+    assert "src/main.cpp" in report and "Repair attempt 1" in report
+    assert str(Path(state.artifacts_dir) / "patches" / "repair-1.diff") in report
+    assert "| Baseline | True | exit 0 | 2 passed, 0 failed | none |" in report
+    assert "| Upgraded | False | exit 8 | 1 passed, 1 failed | regression_case |" in report
+    assert evidence["policy_decisions"] == state.policy_decisions
+    assert evidence["pull_request"] == state.repo_facts["pull_request"]
+    assert evidence["repair_attempt_details"] == state.repair_attempt_details
+
+def test_verification_includes_adapter_cmake_configure_args_and_minimal_env(tmp_path: Path, monkeypatch):
+    import depbot.verification.pipeline as pipeline_module
+
+    captured: list[tuple[str, list[str], dict[str, str] | None]] = []
+    install_envs: list[dict[str, str] | None] = []
+
+    def successful_step(*, label, args, worktree, extra_env, **_kwargs):
+        captured.append((label, args, extra_env))
         output = "1 test passed out of 1" if label.endswith(".tests") else ""
         return CommandResult(
             command_label=label,
@@ -228,15 +299,23 @@ def test_verification_includes_adapter_cmake_configure_args(tmp_path: Path, monk
             stdout_tail=output,
         )
 
-    monkeypatch.setattr("depbot.verification.pipeline._run_step", successful_step)
+    original_run_command = pipeline_module.run_command
+
+    def recording_run_command(**kwargs):
+        install_envs.append(kwargs.get("extra_env"))
+        return original_run_command(**kwargs)
+
+    monkeypatch.setattr(pipeline_module, "_run_step", successful_step)
+    monkeypatch.setattr(pipeline_module, "run_command", recording_run_command)
     adapter = SimpleNamespace(
-        command_env=lambda: {},
+        command_env=lambda: {"CONAN_HOME": str(tmp_path / "isolated-conan")},
         install_args=lambda *_args, **_kwargs: [sys.executable, "-c", "pass"],
         cmake_preset=lambda **_kwargs: None,
         cmake_configure_args=lambda _root, **_kwargs: [
             "-DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake"
         ],
     )
+    expected_env = minimal_env(adapter.command_env())
 
     result = run_verification(
         worktree=tmp_path,
@@ -246,7 +325,69 @@ def test_verification_includes_adapter_cmake_configure_args(tmp_path: Path, monk
         artifacts_dir=tmp_path / "artifacts",
     )
 
-    configure_args = next(args for label, args in captured if label.endswith(".configure"))
+    configure_args = next(args for label, args, _env in captured if label.endswith(".configure"))
     assert result.passed
     assert "-DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake" in configure_args
+    assert install_envs == [expected_env]
+    assert all(env == expected_env for _label, _args, env in captured)
+
+
+def test_verification_recreates_build_dir_before_each_phase(tmp_path: Path, monkeypatch):
+    captured = []
+
+    def successful_step(*, label, args, worktree, **_kwargs):
+        output = "1 test passed out of 1" if label.endswith(".tests") else ""
+        return CommandResult(
+            command_label=label,
+            args=args,
+            cwd=str(worktree),
+            exit_code=0,
+            duration_seconds=0.01,
+            stdout_tail=output,
+        )
+
+    def install_args(root, **_kwargs):
+        captured.append((root / "build" / "stale-cache.txt").exists())
+        (root / "build" / "generated-toolchain.txt").write_text("fresh", encoding="utf-8")
+        return [sys.executable, "-c", "pass"]
+
+    monkeypatch.setattr("depbot.verification.pipeline._run_step", successful_step)
+    adapter = SimpleNamespace(
+        command_env=lambda: {},
+        install_args=install_args,
+        cmake_preset=lambda **_kwargs: None,
+        cmake_configure_args=lambda _root, **_kwargs: [],
+    )
+    build_dir = tmp_path / "build"
+    build_dir.mkdir()
+    (build_dir / "stale-cache.txt").write_text("stale", encoding="utf-8")
+
+    for phase in (VerificationPhase.BASELINE, VerificationPhase.UPGRADED):
+        result = run_verification(
+            worktree=tmp_path,
+            adapter=adapter,
+            phase=phase,
+            policy=UpgradePolicy(require_tests=True),
+            artifacts_dir=tmp_path / "artifacts",
+        )
+        assert result.passed
+        (build_dir / "stale-cache.txt").write_text("stale", encoding="utf-8")
+
+    assert captured == [False, False]
+
+
+def test_ctest_failure_names_are_extracted_from_recorded_output(tmp_path: Path):
+    result = CommandResult(
+        command_label="upgraded.tests",
+        args=["ctest"],
+        cwd=str(tmp_path),
+        exit_code=8,
+        duration_seconds=0.01,
+        stdout_tail=(
+            "0% tests passed, 1 tests failed out of 1\n\n"
+            "The following tests FAILED:\n  1 - repo_a_test (Failed)\n"
+        ),
+    )
+
+    assert _test_counts(result) == (0, 1, ["repo_a_test"])
 

@@ -147,7 +147,9 @@ def _verification_failure(result: VerificationResult, require_tests: bool) -> tu
             return JobStatus.FAILED_TESTS, "policy requires tests but no test command ran"
     elif not result.tests.succeeded:
         failed = f"{result.tests_failed} failed" if result.tests_failed is not None else "failed"
-        return JobStatus.FAILED_TESTS, f"tests {failed} (exit code {result.tests.exit_code})"
+        names = ", ".join(result.failed_test_names)
+        detail = f"; failed tests: {names}" if names else ""
+        return JobStatus.FAILED_TESTS, f"tests {failed} (exit code {result.tests.exit_code}){detail}"
     if not result.passed:
         return JobStatus.FAILED_TESTS, "verification stage reported passed=False"
     return None
@@ -425,7 +427,9 @@ class RepositoryJobRunner:
         )
         self.state.transition(JobStatus.PLANNED, f"{len(plan)} planned edit(s)")
         decision = plan_confidence_gate(self.job.policy, self.state.breaking_changes, plan)
-        self.policy_decisions.append(decision.model_dump(mode="json"))
+        decision_data = decision.model_dump(mode="json")
+        self.policy_decisions.append(decision_data)
+        self.state.policy_decisions.append(decision_data)
         if not decision.allowed:
             raise StageError("policy: " + "; ".join(decision.reasons), blocked=True)
 
@@ -534,10 +538,35 @@ class RepositoryJobRunner:
             worktree=self.worktree, state=st, failure=st.verification, attempt=attempt
         )
         if not patches:
+            st.repair_attempt_details.append({"attempt": attempt, "patches": []})
             st.status_reason = f"{st.status_reason} (repair attempt {attempt}: no repair proposed)"
             return False
         st.transition(JobStatus.PLANNED, f"repair attempt {attempt}: {len(patches)} patch(es)")
-        self._apply_patches(patches)
+        patch_start = len(st.patches)
+        try:
+            self._apply_patches(patches)
+        finally:
+            results = {patch.patch_id: patch for patch in st.patches[patch_start:]}
+            st.repair_attempt_details.append({
+                "attempt": attempt,
+                "patches": [
+                    {
+                        "patch_id": patch.patch_id,
+                        "paths": list(patch.files),
+                        "artifact_path": (
+                            str(self.artifacts_dir / "patches" / f"{patch.patch_id}.diff")
+                            if (self.artifacts_dir / "patches" / f"{patch.patch_id}.diff").is_file()
+                            else None
+                        ),
+                        "status": results[patch.patch_id].status.value if patch.patch_id in results else None,
+                        "rejection_reason": (
+                            results[patch.patch_id].rejection_reason
+                            if patch.patch_id in results else None
+                        ),
+                    }
+                    for patch in patches
+                ],
+            })
         self._check_scope_and_transition(f"repair attempt {attempt}: ")
         return True
 

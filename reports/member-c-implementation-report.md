@@ -1,9 +1,10 @@
 # Member C implementation report
 
 - **Repository:** `hgoel3105/CrustData-Hackathon---DepBot`
-- **Branch:** `member-c/migration-verification-reporting`
-- **Initial development base:** `a49eab83e13752a86aabb2fdf7fa6a927cfbc40f`
-- **Synced upstream main:** `e33cdf1a95f6b7fe1f9f5da6a14e2e2245ba467a` (6 upstream commits; no file conflicts)
+- **Original implementation branch:** `member-c/migration-verification-reporting`
+- **Original development base:** `a49eab83e13752a86aabb2fdf7fa6a927cfbc40f`
+- **Follow-up branch:** `member-c/conan-e2e-reporting`
+- **Follow-up base (current fork/upstream main):** `999e09931fbdfd686699f63d793b6ac30f08a50e`
 - **Date:** 2026-11-06
 
 ## Changes delivered
@@ -13,7 +14,7 @@
 - Added a shell-free verification pipeline for package installation, CMake configure, build, and CTest. It forwards adapter-specific CMake arguments, including vcpkg's toolchain file. Each subprocess has an argv list, working directory, timeout, capped logs, captured tails, exit status, and duration. A required suite with no passing tests cannot be marked passed.
 - Added failure classification and a bounded repair proposal hook. It only proposes a new patch for a reported removed-symbol error that matches existing release and usage evidence; it refuses repeated diffs and does not alter tests.
 - Added a verified-only JSONL migration-pattern store, structured evidence collection, and a Markdown repository report generated from typed run state.
-- Added toydep v1/v2 CMake fixtures and three local repositories. The real fleet E2E selects and migrates A and B independently, then skips C because it is already on 2.0.0.
+- Added toydep v1/v2 CMake fixtures and three local repositories. The initial fleet E2E used `_FixtureAdapter`; the C1–C2 follow-up below replaces that adapter with real local Conan packages and commands.
 
 ## Files added
 
@@ -54,7 +55,7 @@
 
 **This report:** `reports/member-c-implementation-report.md`.
 
-The Member C changes add migration, verification, reporting, fixture, and test files. The branch is now synced to upstream main; its six upstream commits changed shared contracts, adapters, the orchestrator, and documentation without overlapping the Member C paths.
+The original Member C implementation added migration, verification, reporting, fixture, and test files. Its initial six-commit sync was completed before this follow-up; before publishing, the follow-up branch and fork main were fast-forwarded by ten newer upstream commits to the current main SHA listed above.
 
 ## Verification results
 
@@ -86,3 +87,24 @@ The full unit suite was also attempted with `python -m pytest -q tests/unit`. It
 
 The latest focused rerun after the vcpkg configure-argument fix used `-rs`: 17 passed and 2 were skipped because CMake is not installed in the current environment. `compileall` passed. The earlier 18-test focused run and toydep fleet acceptance run were completed when CMake was available. These are separate from the 10 full-suite failures above. Conan package resolution against a real remote was not exercised; the E2E used the local fixture adapter.
 
+
+
+## Follow-up: C1–C4 (2026-11-06)
+
+- **C1 — Conan fixtures:** Added Conan 2 header-library recipes for toydep 1.0.0 and 2.0.0. Repositories A, B, and C now use CMakeDeps, CMakeToolchain, cmake_layout, find_package(toydep), and the generated toydep::toydep target instead of vendored add_subdirectory builds. The demo setup test invokes the CLI with examples/demo-fleet.yaml and checks both create results.
+- **C2 — real adapter E2E:** Replaced _FixtureAdapter with prepare_local_packages() in a temporary Conan home and the production stages from load_default_stages(); only research remains a stand-in. Assertions cover two VERIFIED outcomes, one SKIPPED outcome, successful real Conan/CMake/CTest subprocesses in baseline, probe, and upgraded phases, and no job for current repo_c.
+- **C3 — verification robustness:** Verification commands receive minimal_env(adapter.command_env()). The build directory is recreated between phases. Tests cover BLOCKED baseline failures, FAILED_TESTS with failed names, and timeout results with timed_out=True and exit_code=None.
+- **C4 — evidence report:** upgrade-report.md now includes the recorded pull-request publication state/note, policy decisions, repair-attempt source and artifact patch paths, and baseline/upgraded test counts. Missing facts remain labeled as not recorded.
+
+### Follow-up validation
+
+| Check | Result |
+|---|---|
+| tests/unit/test_verification_reporting_knowledge.py | **12 passed**, exit 0 |
+| Focused orchestrator scenarios (happy path, baseline block, upgraded test failure, repair pass/give-up) | **5 passed**, exit 0 |
+| tests/unit/test_demo_setup.py + tests/e2e/test_toydep_fleet.py | **3 passed, 2 skipped**, exit 0 |
+| Skip reasons | Conan unavailable for demo setup; Conan and CMake must be on PATH for the real-adapter E2E |
+| compileall over src/depbot, tests/unit, and tests/e2e | **Passed**, exit 0 |
+| Real Conan demo setup and real Conan/CMake/CTest fleet E2E | **Not run**; both Conan and CMake are unavailable in this environment |
+
+A broader local orchestrator run also reached the existing default-stage-resolution assertion, but this local validation snapshot did not contain the code_intelligence source files present in the uploaded branch tree. That assertion is not counted as passing; the real-adapter E2E is likewise not counted as passing because it was skipped for missing tools.
