@@ -170,15 +170,20 @@ def publish_pull_request(
     if push.returncode != 0:
         return done(f"git push failed: {push.stderr.strip()[:300]}")
     Path(draft.body_path).write_text(build_pr_body(state, draft.gate, published=True), encoding="utf-8")
+    # REST (`POST /repos/{owner}/{repo}/pulls`) via `gh api`: works wherever `gh` is authenticated,
+    # including environments where GitHub's GraphQL API (used by `gh pr create`) is unavailable.
     create = _call(
         run,
-        ["gh", "pr", "create", "--repo", match["slug"], "--head", draft.head_branch,
-         "--base", draft.base_branch, "--title", draft.title, "--body-file", draft.body_path],
+        ["gh", "api", "--method", "POST", f"repos/{match['slug']}/pulls",
+         "-f", f"title={draft.title}", "-f", f"head={draft.head_branch}", "-f", f"base={draft.base_branch}",
+         "-F", f"body=@{draft.body_path}", "--jq", ".html_url"],
         worktree,
     )
     if create.returncode != 0:
-        return done(f"gh pr create failed: {create.stderr.strip()[:300]}")
+        return done(f"PR creation failed: {(create.stderr or create.stdout).strip()[:300]}")
     url = create.stdout.strip().splitlines()[-1] if create.stdout.strip() else None
+    if not url or not url.startswith("https://"):
+        return done(f"PR creation returned no URL: {create.stdout.strip()[:200]}")
     return done("published (auto-merge disabled)", published=True, url=url)
 
 
