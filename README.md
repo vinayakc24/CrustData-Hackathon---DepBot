@@ -91,6 +91,28 @@ Access uses your existing `git`/`gh` credentials. URLs with embedded credentials
 (`https://user:token@…`) are refused, and nothing is ever pushed except an explicit `--create-pr` branch.
 `depbot upgrade --repo https://github.com/acme/service-x …` works the same way.
 
+### Watching upstream releases (`depbot monitor`)
+
+Add the upstream projects to watch to the fleet config:
+
+```yaml
+watches:
+  - dependency_name: fmt          # as declared in conanfile.txt / vcpkg.json
+    upstream_repo: fmtlib/fmt     # GitHub owner/name
+```
+
+```bash
+depbot monitor --fleet depbot-fleet.yaml --once --dry-run   # what would happen, nothing recorded
+depbot monitor --fleet depbot-fleet.yaml --once             # one poll; process new releases
+depbot monitor --fleet depbot-fleet.yaml --interval 3600    # keep polling (Ctrl-C to stop)
+```
+
+Each poll compares the lowest version any enabled repository declares with the upstream's latest stable
+GitHub release. A newer release becomes a `ReleaseEvent`, which goes through the same path as
+`depbot run`: duplicate check, selection, isolated jobs, fleet summary. A release already processed is
+reported as a duplicate. A failing watch or fleet run doesn't stop the others. `run` options
+(`--approve-major`, `--create-pr`, `--llm …`) apply. The minimum interval is 60 s.
+
 ### Single-repository fallback
 
 ```bash

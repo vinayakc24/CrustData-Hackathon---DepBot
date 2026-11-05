@@ -1,4 +1,4 @@
-# DepBot Contract Handoff — v0.6.0
+# DepBot Contract Handoff — v0.6.1
 
 Owner: **Member A**. These contracts are frozen for the first end-to-end demo.
 B and C implement against them; if you need a change, propose it to A (field,
@@ -326,6 +326,9 @@ target, not just the target version's section.
 
 ## 7. Change log
 
+- 0.6.1 — additive: `FleetConfig.watches: list[DependencyWatch]` (`dependency_name`, `upstream_repo`, `enabled`)
+  and `depbot monitor` (`depbot.fleet.monitor`). It uses B's `depbot.monitor.release_monitor.poll_once` unchanged and
+  recomputes watch versions from the inventory every cycle.
 - 0.6.0 — additive: `ChangeSource` and `BreakingChange.source` / `.affected_usrs`; R1 header API diff
   (`depbot.research.header_diff`, written by A at the team's request; B wires it); shared libclang loader
   `depbot.clang_support` (also for B's AST impact layer); engine runs the probe **before** research and saves

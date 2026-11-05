@@ -12,11 +12,14 @@ import argparse
 import json
 import logging
 import os
+import signal
 import sys
+import threading
 from pathlib import Path
 
 from depbot.fleet.dependency_index import DependencyIndex, scan_repository
 from depbot.fleet.events import EventLog
+from depbot.fleet.monitor import PollReport, poll_fleet_once, run_monitor
 from depbot.fleet.registry import Fleet, RegistryError, load_event, load_fleet
 from depbot.fleet.runner import DuplicateEvent, run_fleet
 from depbot.fleet.selection import RepositorySelection, select_repositories, state_dir_for
@@ -298,6 +301,59 @@ def cmd_upgrade(args: argparse.Namespace) -> int:
     return 0 if outcome.status in _GOOD else 1
 
 
+def _print_poll_report(report: PollReport, as_json: bool) -> None:
+    if as_json:
+        print(report.model_dump_json(indent=2))
+        return
+    print(f"polled {len(report.watches)} watch(es): {', '.join(report.watches) or 'none'}")
+    for note in report.notes:
+        print(f"  note: {note}")
+    for failure in report.failures:
+        print(f"  FAILED  {failure}")
+    if not report.events and not report.failures and report.watches:
+        print("  no new releases")
+    for outcome in report.events:
+        e = outcome.event
+        head = f"  {outcome.action.upper():<9} {e.event_id} ({e.dependency_name} {e.previous_version} -> {e.target_version})"
+        if outcome.summary is not None:
+            s = outcome.summary
+            head += (f": verified={s.repositories_verified} skipped={s.repositories_skipped} "
+                     f"failed_or_blocked={s.repositories_failed_or_blocked} | {s.summary_path}")
+        elif outcome.jobs or outcome.action == "dry_run":
+            head += f": would run jobs for {', '.join(outcome.jobs) or 'no repositories'}"
+        elif outcome.detail:
+            head += f": {outcome.detail}"
+        print(head)
+
+
+def cmd_monitor(args: argparse.Namespace) -> int:
+    """Poll watched upstreams; process new releases across the fleet."""
+    fleet, state_dir = _load(args)
+    if not fleet.config.watches:
+        print("error: the fleet config has no `watches:`; nothing to monitor", file=sys.stderr)
+        return 2
+    llm_factory = _llm_factory(args)
+    kwargs = dict(state_dir=state_dir, artifacts_root=Path(args.artifacts).resolve(),
+                  stages_factory=load_default_stages, create_pr=args.create_pr,
+                  llm_factory=llm_factory, dry_run=args.dry_run)
+    if args.once:
+        report = poll_fleet_once(fleet, **kwargs)
+        _print_poll_report(report, args.json)
+        return 0 if report.ok else 1
+    stop = threading.Event()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(sig, lambda *_: stop.set())
+    print(f"monitoring {len(fleet.config.watches)} watch(es) every {args.interval:.0f}s; Ctrl-C to stop")
+    try:
+        run_monitor(fleet, interval_seconds=args.interval, stop=stop,
+                    on_report=lambda r: _print_poll_report(r, args.json), **kwargs)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    print("monitor stopped")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="depbot", description=__doc__.splitlines()[0])
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -343,6 +399,16 @@ def build_parser() -> argparse.ArgumentParser:
     up.add_argument("--json", action="store_true")
     _add_llm_args(up)
     up.set_defaults(func=cmd_upgrade)
+
+    mon = sub.add_parser("monitor", parents=[common], help="poll watched upstreams and process new releases")
+    mon.add_argument("--once", action="store_true", help="poll a single time and exit")
+    mon.add_argument("--interval", type=float, default=3600.0, help="seconds between polls (default: 3600)")
+    mon.add_argument("--dry-run", action="store_true", help="report new releases and selection only")
+    mon.add_argument("--approve-major", action="store_true", help="operator approval for major upgrades")
+    mon.add_argument("--create-pr", action="store_true", help="open GitHub PRs for verified repos")
+    mon.add_argument("--artifacts", default="artifacts", help="artifacts root (default: ./artifacts)")
+    _add_llm_args(mon)
+    mon.set_defaults(func=cmd_monitor)
 
     demo = sub.add_parser("demo", help="demo helpers").add_subparsers(dest="demo_command", required=True)
     setup = demo.add_parser("setup", help="build local recipes into the fleet's isolated Conan home")
