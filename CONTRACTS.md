@@ -1,4 +1,4 @@
-# DepBot Contract Handoff — v0.4.0
+# DepBot Contract Handoff — v0.5.0
 
 Owner: **Member A**. These contracts are frozen for the first end-to-end demo.
 B and C implement against them; if you need a change, propose it to A (field,
@@ -221,8 +221,68 @@ result = client.complete_structured(
 - **Default:** `--llm none` (or `$DEPBOT_LLM`). The deterministic demo must work in this mode or with fixtures.
 - `depbot.llm.runtime` imports only `depbot.llm.base`.
 
+## 9. Impact cascade (A: contracts + engine; B: layers; C: diagnostics)
+
+Each layer settles every match it can prove, then hands only the residue to the next one.
+The LLM goes last and never decides an edit on its own.
+
+```text
+I1 ripgrep prefilter → I2 libclang USR resolution → I3 compiler probe → I4 LLM (residue only)
+```
+
+**What A provides (implemented):**
+- `CodeUsage` optional provenance: `resolved_by: ResolutionLayer` (`text_prefilter`, `clang_ast`,
+  `compiler_probe`, `llm`, `human`), `resolution_proof`, `resolved_usr`, `declaration_file`,
+  `preprocessor_context`. Validation rejects `resolved_by="llm"` with `impact="definite"`.
+  A ruled-out text match should be kept as `impact="unaffected"` with `resolved_by="clang_ast"` and a proof.
+- `AnalysisMethod.COMPILER_DIAGNOSTIC`, `CompilerDiagnostic`, `VerificationResult.diagnostics`.
+- `adapter.command_env()` always sets `CMAKE_EXPORT_COMPILE_COMMANDS=ON`, so every configure writes
+  `compile_commands.json`. After a passing baseline the engine copies it to
+  `artifacts_dir/compile_commands.baseline.json` and records
+  `state.repo_facts["compile_commands"] = {"baseline", "worktree", "external_include_dirs"}`.
+  `external_include_dirs` are the include paths outside the repo (dependency headers, e.g. the Conan cache).
+  Helpers: `depbot.repository.compile_db.load_compile_commands / include_dirs / external_include_dirs`.
+- **Probe step** (`UpgradePolicy.run_probe_build=True`): after research and before impact, the engine copies
+  the worktree to `artifacts_dir/probe/worktree`, bumps the dependency there, and calls
+  `verify(phase=PROBE, artifacts_dir=artifacts_dir/"probe")`. It writes
+  `artifacts_dir/probe/diagnostics.json` (a list of `CompilerDiagnostic`) and stores `state.probe`.
+  The probe is advisory: it never changes the job status, and the real worktree is still on the old version
+  when `impact` runs.
+- Reference spike with results: `docs/spikes/clang_usr_resolution/` (11 text matches →
+  6 confirmed, 4 ruled out with proof, 1 residual; no LLM).
+
+**B — inside `find_impacted_usages` (signature unchanged):**
+1. I1: ripgrep candidates (existing).
+2. I2: `code_intelligence/clang_analyzer.py`. For each translation unit in
+   `compile_commands.baseline.json` that contains a candidate, parse with its flags. A target
+   declaration is one of the changed symbol whose file is under an `external_include_dirs` entry.
+   Classify every candidate as confirmed (`definite`), ruled out (`unaffected`, with proof) or residual.
+   Follow `docs/spikes/clang_usr_resolution/RESULTS.md` (using-declarations, macro bodies, token kinds).
+3. I3: read `artifacts_dir/probe/diagnostics.json`. An error at a residual's file/line confirms it
+   (`resolved_by="compiler_probe"`). An error that no breaking change explains becomes a new `CodeUsage`
+   with `impact="unknown"` and a proof naming the diagnostic.
+4. I4: only remaining residuals, and only if `current_llm_client()` is set. Use `task="impact_classification"`
+   with the snippet ± context, `preprocessor_context`, the `BreakingChange`, and what I2/I3 proved.
+   The answer may only be `possible` or `unaffected`, never `definite`.
+5. Fallback without `compile_commands` or libclang: today's text-based behavior, with `resolved_by="text_prefilter"`.
+   Dependency: `pip install "clang==18.1.8"` (bindings for the system libclang 18).
+
+**C — verification:**
+1. **Bug (blocks real Conan runs):** `pipeline._preset_build_dir` only reads `<worktree>/CMakePresets.json`.
+   Conan 2 writes `CMakeUserPresets.json`, which `include`s `build/<Type>/generators/CMakePresets.json`.
+   Follow the include chain. Otherwise the verifier configures without the Conan toolchain and
+   `find_package` fails. The vendored fixtures hide this.
+2. Fill `VerificationResult.diagnostics` from GCC/Clang output (`file:line:col: severity: message [-Wopt]`),
+   with repository-relative paths (`None` for files outside the worktree), in every phase. The probe phase is the important one.
+3. Phase `probe` is a normal verification run; no special casing is needed.
+
 ## 7. Change log
 
+- 0.5.0 — additive: impact-cascade provenance on `CodeUsage` (`resolved_by`, `resolution_proof`, `resolved_usr`,
+  `declaration_file`, `preprocessor_context`), `ResolutionLayer`, `AnalysisMethod.COMPILER_DIAGNOSTIC`,
+  `CompilerDiagnostic` + `VerificationResult.diagnostics`, `VerificationPhase.PROBE`, `DepBotState.probe`,
+  `UpgradePolicy.run_probe_build`; engine probe step and baseline compile-database capture;
+  `command_env()` now always exports compile commands.
 - 0.4.0 — additive: `depbot.llm.runtime` (`get_llm_client`, `current_llm_client`, `use_llm_client`,
   `LLMNotConfigured`, `fixture_factory`), production provider `depbot.llm.provider.AnthropicLLMClient`,
   CLI `--llm/--llm-fixtures/--llm-model`, and `run_repository_job(..., llm_factory=)` /

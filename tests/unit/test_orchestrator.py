@@ -133,7 +133,8 @@ def test_happy_path_verifies_and_never_touches_source(job, tmp_path):
     saved = json.loads((art / "state.json").read_text())
     assert [h["to_status"] for h in saved["history"]] == [
         "INSPECTED", "RESEARCHED", "IMPACT_ANALYZED", "PLANNED", "PATCHED", "VERIFIED"]
-    assert state.baseline.phase == "baseline" and len(state.command_results) == 8
+    assert state.baseline.phase == "baseline" and state.probe.phase == "probe"
+    assert len(state.command_results) == 12  # baseline + probe + upgraded, 4 steps each
 
 
 def test_no_usages_bumps_manifest_and_reports_unaffected(job, tmp_path):
@@ -233,7 +234,7 @@ def _fails_until(n_good_after):
     calls = {"upgraded": 0}
 
     def verify(phase, **kw):
-        if phase == "baseline":
+        if phase in ("baseline", "probe"):
             return _passing(phase)
         calls["upgraded"] += 1
         if calls["upgraded"] > n_good_after:

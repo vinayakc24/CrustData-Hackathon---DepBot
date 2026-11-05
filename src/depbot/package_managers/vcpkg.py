@@ -336,7 +336,8 @@ class VcpkgAdapter(PackageManagerAdapter):
         ]
 
     def command_env(self) -> dict[str, str]:
-        env = {k: v for k in _PASS_ENV if (v := os.environ.get(k))}
+        env = super().command_env()
+        env.update({k: v for k in _PASS_ENV if (v := os.environ.get(k))})
         env["VCPKG_DISABLE_METRICS"] = "1"
         return env
 

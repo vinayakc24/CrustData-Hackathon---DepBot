@@ -17,6 +17,7 @@ import importlib
 import json
 import logging
 import secrets
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -39,6 +40,11 @@ from depbot.llm.base import LLMError
 from depbot.llm.runtime import LLMFactory, use_llm_client
 from depbot.policy.engine import plan_confidence_gate
 from depbot.reporting.pull_request import prepare_pull_request, publish_pull_request
+from depbot.repository.compile_db import (
+    external_include_dirs,
+    find_compile_commands,
+    load_compile_commands,
+)
 from depbot.repository.paths import UnsafePath, is_allowed, safe_join
 from depbot.repository.worktree import (
     UnsafeRepository,
@@ -51,6 +57,11 @@ from depbot.repository.worktree import (
 from depbot.state import FAILURE_STATUSES, DepBotState, JobStatus
 
 log = logging.getLogger(__name__)
+
+
+def _probe_ignore(_dir: str, names: list[str]) -> set[str]:
+    # Fresh build state and no Git metadata in the probe copy.
+    return {n for n in names if n in (".git", "build", "CMakeUserPresets.json", "vcpkg_installed")}
 
 
 class _SkipJob(Exception):
@@ -221,6 +232,7 @@ class RepositoryJobRunner:
         try:
             self._inspect()
             self._research()
+            self._probe()
             self._impact()
             self._plan()
             self._patch()
@@ -302,7 +314,69 @@ class RepositoryJobRunner:
                     "(cannot separate regressions from pre-existing failures)",
                     blocked=True,
                 )
+            self._record_compile_db()
         self.state.transition(JobStatus.INSPECTED)
+
+    def _record_compile_db(self) -> None:
+        """Keep the baseline compile database for the impact stage's AST layer."""
+        found = find_compile_commands(self.worktree)
+        if found is None:
+            self.state.repo_facts["compile_commands"] = None
+            return
+        saved = self.artifacts_dir / "compile_commands.baseline.json"
+        shutil.copyfile(found, saved)
+        try:
+            dep_dirs = external_include_dirs(load_compile_commands(saved), self.worktree)
+        except (ValueError, OSError) as exc:
+            dep_dirs = []
+            log.warning("unreadable compile database %s: %s", found, exc)
+        self.state.repo_facts["compile_commands"] = {
+            "baseline": str(saved),
+            "worktree": str(found),
+            "external_include_dirs": dep_dirs,
+        }
+
+    def _probe(self) -> None:
+        """Impact layer I3: build a scratch copy against the target version *before*
+        planning, so compiler diagnostics can prove where the upgrade breaks the code.
+        Advisory only: it never changes the job status and never touches the worktree."""
+        assert self.adapter is not None
+        facts: dict[str, object] = {"ran": False}
+        self.state.repo_facts["probe"] = facts
+        if not self.job.policy.run_probe_build:
+            facts["skipped"] = "disabled by policy (run_probe_build=false)"
+            return
+        probe_dir = self.artifacts_dir / "probe"
+        probe_wt = probe_dir / "worktree"
+        try:
+            shutil.copytree(self.worktree, probe_wt, symlinks=True, ignore=_probe_ignore)
+            self.adapter.update_dependency(
+                probe_wt, self.state.dependency.name, self.state.dependency.target_version
+            )
+            result = self.stages.verify(
+                worktree=probe_wt,
+                adapter=self.adapter,
+                phase=VerificationPhase.PROBE,
+                policy=self.job.policy,
+                artifacts_dir=probe_dir,
+            )
+        except (PackageManagerError, StageError, OSError) as exc:
+            facts["skipped"] = f"probe could not run: {exc}"
+            return
+        self.state.probe = result
+        self._record_commands(result)
+        diagnostics_path = probe_dir / "diagnostics.json"
+        _write(
+            diagnostics_path,
+            json.dumps([d.model_dump(mode="json") for d in result.diagnostics], indent=2),
+        )
+        facts.update(
+            ran=True,
+            build_succeeded=bool(result.build and result.build.succeeded),
+            errors=sum(d.severity in ("error", "fatal error") for d in result.diagnostics),
+            diagnostics_path=str(diagnostics_path),
+            worktree=str(probe_wt),
+        )
 
     def _research(self) -> None:
         changes = self.stages.research(

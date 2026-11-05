@@ -124,6 +124,7 @@ class DepBotState(BaseModel):
     changed_files: list[str] = Field(default_factory=list)
     command_results: list[CommandResult] = Field(default_factory=list)
     baseline: VerificationResult | None = None
+    probe: VerificationResult | None = None  # advisory; never decides the job status
     verification: VerificationResult | None = None
     repair_attempts: int = 0
     max_repair_attempts: int = 2

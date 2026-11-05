@@ -170,6 +170,7 @@ def test_commands_env_and_preflight(repo, tmp_path, monkeypatch):
     assert "-DVCPKG_MANIFEST_INSTALL=OFF" in args and "-DCMAKE_BUILD_TYPE=Debug" in args
     env = adapter.command_env()
     assert env["VCPKG_ROOT"] == str(root) and env["VCPKG_DISABLE_METRICS"] == "1"
+    assert env["CMAKE_EXPORT_COMPILE_COMMANDS"] == "ON"
     assert "GITHUB_TOKEN" not in env
 
 

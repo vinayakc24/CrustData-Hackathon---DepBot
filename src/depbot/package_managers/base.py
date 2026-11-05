@@ -83,8 +83,10 @@ class PackageManagerAdapter(ABC):
 
     def command_env(self) -> dict[str, str]:
         """Extra environment variables every install/configure/build/test command
-        must receive (e.g. an isolated CONAN_HOME). Merge into ``minimal_env()``."""
-        return {}
+        must receive (e.g. an isolated CONAN_HOME). Merge into ``minimal_env()``.
+        Always includes ``CMAKE_EXPORT_COMPILE_COMMANDS=ON`` (CMake >= 3.17 reads it from
+        the environment), so every configure, preset or not, writes compile_commands.json."""
+        return dict(COMPILE_DB_ENV)
 
     def cmake_configure_args(self, repo_root: Path, *, build_type: str = "Release") -> list[str]:
         """Extra ``cmake`` configure arguments when ``cmake_preset()`` is None
@@ -95,6 +97,8 @@ class PackageManagerAdapter(ABC):
         """Tooling problems that make install/build impossible (checked before any edit)."""
         return []
 
+
+COMPILE_DB_ENV = {"CMAKE_EXPORT_COMPILE_COMMANDS": "ON"}
 
 # Only these variables reach repository builds/tests: never tokens or API keys.
 _PASSTHROUGH_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "CC", "CXX", "CMAKE_GENERATOR")
