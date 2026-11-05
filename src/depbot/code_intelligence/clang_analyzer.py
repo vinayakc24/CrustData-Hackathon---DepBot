@@ -113,8 +113,14 @@ def _collect(ci, tu, root: Path, symbols: set[str], dep_dirs: list[Path], facts:
         if rel is None:
             continue
         covered.add(rel)
-        key = (rel, loc.line, cur.spelling)
-        if cur.kind in ref_kinds and cur.spelling in symbols:
+        # TYPE_REF/TEMPLATE_REF are spelled qualified ("fmt::parse_context"); use the
+        # referenced declaration's own name so type and alias uses match too.
+        name = cur.spelling
+        if cur.kind in (K.TYPE_REF, K.TEMPLATE_REF) and cur.referenced is not None:
+            name = cur.referenced.spelling or name
+        name = name.rsplit("::", 1)[-1]
+        key = (rel, loc.line, name)
+        if cur.kind in ref_kinds and name in symbols:
             decls = overloaded_decls(cur) if cur.kind == K.OVERLOADED_DECL_REF else [cur.referenced]
             for d in decls:
                 if d is not None and d.get_usr():

@@ -27,7 +27,7 @@ def _classify_text(text: str, *, stage: str) -> str:
         token in value
         for token in (
             "no member named", "was not declared", "has no member", "unknown type name",
-            "is not a member of",  # GCC/MSVC for a missing qualified name (e.g. toydep::old_sum)
+            "is not a member of", "has not been declared",  # GCC/MSVC for a missing qualified name (e.g. toydep::old_sum)
             "identifier is undefined", "identifier \"", "undeclared identifier",
         )
     ):

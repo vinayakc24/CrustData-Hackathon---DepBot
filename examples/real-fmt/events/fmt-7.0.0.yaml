@@ -1,0 +1,9 @@
+event_id: fmt-7.0.0
+dependency_name: fmt
+upstream_repo: fmtlib/fmt
+previous_version: 6.2.1
+target_version: 7.0.0
+event_type: release
+# Upstream Markdown changelog, fetched by prepare.sh from fmtlib/fmt (doc/ChangeLog-old.md).
+changelog_path: ../.work/ChangeLog-old.md
+detected_at: "2026-11-06T00:00:00+00:00"

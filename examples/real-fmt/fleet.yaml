@@ -1,0 +1,14 @@
+# Demo B: a real upstream upgrade, {fmt} 6.2.1 -> 7.0.0.
+# Run examples/real-fmt/prepare.sh first (builds both fmt releases into the
+# fleet's isolated, offline Conan home). See examples/real-fmt/README.md.
+fleet_id: real-fmt-demo
+default_policy_id: demo
+policies:
+  demo:
+    allowed_change_levels: [patch, minor, major]
+    require_human_approval_for_major: true
+    max_repair_attempts: 2
+repositories:
+  - repository_id: fmt_point_service
+    display_name: Point formatter service (custom fmt::formatter)
+    repo_url_or_path: app

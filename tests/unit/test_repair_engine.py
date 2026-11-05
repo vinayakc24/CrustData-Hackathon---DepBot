@@ -78,3 +78,9 @@ def test_declines_non_symbol_failures_out_of_range_attempts_and_known_diffs(wt):
     assert propose_repair(worktree=wt, state=_state(patches=[applied]), failure=good, attempt=2) == []
     without_replacement = CHANGE.model_copy(update={"replacement_symbols": []})
     assert propose_repair(worktree=wt, state=_state(breaking_changes=[without_replacement]), failure=good, attempt=1) == []
+
+
+def test_gcc_has_not_been_declared_is_a_removed_symbol():
+    # GCC's wording for a removed qualified type (fmt 7: `fmt::parse_context`).
+    from depbot.verification.error_classifier import classify_failure
+    assert classify_failure(_failure(message="'fmt::parse_context' has not been declared")) == "removed_symbol"
