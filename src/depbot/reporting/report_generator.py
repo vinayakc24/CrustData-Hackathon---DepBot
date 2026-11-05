@@ -109,28 +109,128 @@ def render_repository_report(evidence: dict[str, Any]) -> str:
             f"- Dependency manifest: `{manifest['manifest_path']}` {manifest['from_version']} → {manifest['to_version']}"
         )
     upgraded = verification["upgraded"]
-    if upgraded is None:
-        ctest_result = "not run"
-        test_counts = "not recorded"
-    elif upgraded.get("tests") is None:
+    if upgraded is None or upgraded.get("tests") is None:
         ctest_result = "not run"
         test_counts = "not recorded"
     else:
-        ctest_result = "passed" if upgraded["tests"].get("exit_code") == 0 and not upgraded["tests"].get("timed_out") else "failed"
+        tests = upgraded["tests"]
+        passed_count, failed_count = upgraded.get("tests_passed"), upgraded.get("tests_failed")
+        if tests.get("timed_out"):
+            ctest_result = "timed out"
+        elif tests.get("exit_code") is None:
+            ctest_result = "no exit code recorded"
+        elif passed_count is not None and failed_count is not None:
+            ctest_result = (
+                "passed" if tests.get("exit_code") == 0 and passed_count > 0 and failed_count == 0
+                else "failed" if failed_count > 0 or tests.get("exit_code") != 0
+                else "no tests recorded"
+            )
+        else:
+            ctest_result = f"exit code {tests.get('exit_code')} (test counts not recorded)"
         test_counts = (
-            f"{upgraded.get('tests_passed')} passed, {upgraded.get('tests_failed')} failed"
-            if upgraded.get("tests_passed") is not None
-            else "counts unavailable in command output"
+            f"{passed_count} passed, {failed_count} failed"
+            if passed_count is not None and failed_count is not None
+            else "not recorded"
         )
-    lines += ["", "## Verification", "", f"- Baseline passed: **{verification['baseline'].get('passed') if verification['baseline'] else 'not run'}**",
-              f"- Upgraded verification passed: **{upgraded.get('passed') if upgraded else 'not run'}**",
-              f"- CTest: **{ctest_result}**; {test_counts}",
-              "", *_render_commands(verification["commands"]), ""]
+    lines += [
+        "",
+        "## Verification",
+        "",
+        f"- Baseline verification passed: **{verification['baseline'].get('passed') if verification['baseline'] else 'not run'}**",
+        f"- Upgraded verification passed: **{upgraded.get('passed') if upgraded and upgraded.get('passed') is not None else 'not recorded'}**",
+        f"- CTest: **{ctest_result}**; {test_counts}",
+        "",
+        "| Phase | Verification passed | CTest command | Test counts | Failed test names |",
+        "|---|:---:|---|---|---|",
+    ]
+    for phase_name in ("baseline", "upgraded"):
+        phase = verification.get(phase_name)
+        if phase is None:
+            lines.append(f"| {phase_name.title()} | not run | not run | not recorded | not recorded |")
+            continue
+        test_command = phase.get("tests")
+        if test_command is None:
+            ctest_status, counts, failed_names = "not run", "not recorded", "not recorded"
+        else:
+            if test_command.get("timed_out"):
+                ctest_status = "timed out"
+            elif test_command.get("exit_code") is None:
+                ctest_status = "no exit code recorded"
+            else:
+                ctest_status = f"exit {test_command.get('exit_code')}"
+            passed_count, failed_count = phase.get("tests_passed"), phase.get("tests_failed")
+            counts = (
+                f"{passed_count} passed, {failed_count} failed"
+                if passed_count is not None and failed_count is not None
+                else "not recorded"
+            )
+            names = phase.get("failed_test_names")
+            if names:
+                failed_names = ", ".join(names)
+            elif failed_count == 0:
+                failed_names = "none"
+            else:
+                failed_names = "not recorded"
+        phase_passed = phase.get("passed")
+        phase_passed = str(phase_passed) if phase_passed is not None else "not recorded"
+        lines.append(
+            f"| {phase_name.title()} | {phase_passed} | {_cell(ctest_status)} | "
+            f"{_cell(counts)} | {_cell(failed_names)} |"
+        )
+    lines.extend(["", *_render_commands(verification["commands"]), ""])
     for phase_name in ("baseline", "upgraded"):
         phase = verification.get(phase_name)
         if phase and phase.get("failure_category"):
             lines.append(f"- {phase_name.title()} failure category: `{phase['failure_category']}`")
-    lines += ["", "## Repair and remaining risks", "", f"- Repair attempts recorded: {evidence['repair_attempts']}"]
+
+    pull_request = evidence.get("pull_request")
+    lines += ["", "## Pull-request artifact", ""]
+    if not isinstance(pull_request, dict):
+        lines.append("No pull-request artifact status was recorded.")
+    else:
+        published = pull_request.get("published")
+        if published is None and pull_request.get("skipped"):
+            published = False
+        published_text = str(published) if published is not None else "not recorded"
+        lines.append(f"- Published to GitHub: **{_cell(published_text)}**")
+        url = pull_request.get("url")
+        if url:
+            lines.append(f"- URL: {url}")
+        note = pull_request.get("publish_note") or pull_request.get("skipped")
+        if note:
+            lines.append(f"- Note: {_cell(note)}")
+        elif published is None:
+            lines.append("- Note: not recorded")
+
+    decisions = evidence.get("policy_decisions")
+    lines += ["", "## Policy decisions", ""]
+    if decisions:
+        for index, decision in enumerate(decisions, start=1):
+            lines.extend([f"### Decision {index}", "", "```json", json.dumps(decision, indent=2, ensure_ascii=False), "```", ""])
+    else:
+        lines.append("No policy decisions were recorded.")
+
+    lines += ["", "## Repair and remaining risks", "", f"- Repair transitions recorded: {evidence['repair_attempts']}"]
+    attempts = evidence.get("repair_attempt_details")
+    if attempts:
+        for attempt in attempts:
+            lines.append(f"- Repair attempt {attempt.get('attempt', 'not recorded')}:")
+            patches = attempt.get("patches")
+            if not patches:
+                lines.append("  - No patch entries were recorded for this attempt.")
+                continue
+            for patch in patches:
+                paths = patch.get("paths") or []
+                path_text = ", ".join(f"`{path}`" for path in paths) or "no path recorded"
+                status = patch.get("status") or "not recorded"
+                artifact_path = patch.get("artifact_path")
+                artifact_text = f"; artifact `{artifact_path}`" if artifact_path else "; artifact path not recorded"
+                lines.append(
+                    f"  - Patch `{_cell(patch.get('patch_id') or 'not recorded')}`: "
+                    f"{path_text}{artifact_text}; status **{_cell(status)}**"
+                )
+    else:
+        lines.append("No per-attempt repair details were recorded.")
     risks = evidence["remaining_risks"]
     lines.extend([f"- {risk}" for risk in risks] or ["- No additional risks were recorded."])
     lines += ["", "Verification status reflects recorded subprocess results; no result is inferred when a command or test was not run.", ""]
@@ -142,7 +242,10 @@ def write_repository_report(*, state: DepBotState, artifacts_dir: Path) -> Path:
     evidence = collect_evidence(state)
     artifacts_dir.mkdir(parents=True, exist_ok=True)
     json_path = artifacts_dir / "evidence.json"
-    markdown_path = artifacts_dir / "repository-report.md"
+    markdown_path = artifacts_dir / "upgrade-report.md"
+    rendered = render_repository_report(evidence)
     json_path.write_text(json.dumps(evidence, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    markdown_path.write_text(render_repository_report(evidence), encoding="utf-8")
+    markdown_path.write_text(rendered, encoding="utf-8")
+    # Keep the existing filename as a compatibility copy for downstream consumers.
+    (artifacts_dir / "repository-report.md").write_text(rendered, encoding="utf-8")
     return markdown_path

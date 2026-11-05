@@ -100,12 +100,17 @@ def run_command(
             exit_code = proc.wait(timeout=timeout_seconds)
         except subprocess.TimeoutExpired:
             timed_out = True
-            proc.terminate()
             try:
-                exit_code = proc.wait(timeout=2)
+                proc.terminate()
+            except OSError:
+                pass
+            try:
+                proc.wait(timeout=2)
             except subprocess.TimeoutExpired:
                 proc.kill()
-                exit_code = proc.wait()
+                proc.wait()
+            # The command exceeded its deadline; the termination code is not its result.
+            exit_code = None
         out_thread.join(timeout=5)
         err_thread.join(timeout=5)
         if out_thread.is_alive() or err_thread.is_alive():

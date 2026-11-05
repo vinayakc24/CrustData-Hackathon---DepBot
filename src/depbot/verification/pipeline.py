@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 from pathlib import Path
 
 from depbot.models import (
@@ -13,7 +14,7 @@ from depbot.models import (
     VerificationResult,
 )
 from depbot.interfaces import StageError
-from depbot.package_managers.base import PackageManagerAdapter
+from depbot.package_managers.base import PackageManagerAdapter, minimal_env
 from depbot.verification.command_runner import run_command
 from depbot.verification.error_classifier import classify_failure
 
@@ -61,6 +62,27 @@ def _preset_build_dir(worktree: Path, preset: str) -> Path | None:
     return None
 
 
+def _reset_build_dir(worktree: Path) -> None:
+    """Recreate the isolated build tree so phases cannot reuse stale CMake caches."""
+    build_dir = worktree / "build"
+    if build_dir.is_symlink():
+        raise StageError("refusing to reset a symlinked build directory", blocked=True)
+    resolved = build_dir.resolve()
+    if resolved == worktree or worktree not in resolved.parents:
+        raise StageError(f"build directory escapes the isolated worktree: {resolved}", blocked=True)
+    try:
+        if build_dir.exists():
+            if build_dir.is_dir():
+                shutil.rmtree(build_dir)
+            else:
+                build_dir.unlink()
+        build_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise StageError(
+            f"could not recreate isolated build directory {build_dir}: {exc}", blocked=True
+        ) from exc
+
+
 def _run_step(
     *,
     label: str,
@@ -89,7 +111,12 @@ def _test_counts(result: CommandResult) -> tuple[int | None, int | None, list[st
         if failed:
             section = re.search(r"The following tests FAILED:\s*(.*?)(?:\n\s*\n|\Z)", output, re.DOTALL)
             if section:
-                names = [line.strip(" \t\r\n0123456789.:") for line in section.group(1).splitlines() if line.strip()]
+                for line in section.group(1).splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    named = re.match(r"\d+\s*[-:]\s*(.+?)(?:\s+\(Failed\))?$", line, re.IGNORECASE)
+                    names.append(named.group(1).strip() if named else line)
         return max(0, total - failed), failed, names
     passed_match = re.search(r"(\d+) tests? passed out of (\d+)", output, re.IGNORECASE)
     if passed_match:
@@ -119,9 +146,10 @@ def run_verification(
     zero discovered tests is reported as unpassed.
     """
     worktree = worktree.resolve()
+    _reset_build_dir(worktree)
     logs_dir = artifacts_dir / "commands" / phase.value
     logs_dir.mkdir(parents=True, exist_ok=True)
-    extra_env = adapter.command_env()
+    extra_env = minimal_env(adapter.command_env())
     results: dict[str, CommandResult | None] = {"install": None, "configure": None, "build": None, "tests": None}
 
     try:
