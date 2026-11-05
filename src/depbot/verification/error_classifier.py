@@ -27,6 +27,7 @@ def _classify_text(text: str, *, stage: str) -> str:
         token in value
         for token in (
             "no member named", "was not declared", "has no member", "unknown type name",
+            "is not a member of",  # GCC/MSVC for a missing qualified name (e.g. toydep::old_sum)
             "identifier is undefined", "identifier \"", "undeclared identifier",
         )
     ):
@@ -55,7 +56,10 @@ def classify_failure(result: VerificationResult) -> str | None:
             if "adapter install_args failed" in step.stderr_tail.lower():
                 return "dependency_install"
             return "environment"
-        output = f"{step.stderr_tail}\n{step.stdout_tail}"
+        # Structured diagnostics come from the full log; tails may cut off the error line.
+        errors = "\n".join(d.message for d in result.diagnostics
+                           if d.command_label == step.command_label and d.severity in ("error", "fatal error"))
+        output = f"{errors}\n{step.stderr_tail}\n{step.stdout_tail}"
         return _classify_text(output, stage=step.command_label.rsplit(".", 1)[-1])
     if result.tests_failed:
         return "test_regression"
