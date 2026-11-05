@@ -56,9 +56,10 @@ def test_minimal_env_drops_secrets(monkeypatch):
 
 def test_adapter_env_follows_depbot_conan_home(monkeypatch, tmp_path):
     monkeypatch.delenv(CONAN_HOME_ENV, raising=False)
-    assert ConanAdapter().command_env() == {}
+    assert ConanAdapter().command_env() == {"CMAKE_EXPORT_COMPILE_COMMANDS": "ON"}
     monkeypatch.setenv(CONAN_HOME_ENV, str(tmp_path))
-    assert ConanAdapter().command_env() == {"CONAN_HOME": str(tmp_path.resolve())}
+    assert ConanAdapter().command_env() == {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON", "CONAN_HOME": str(tmp_path.resolve())}
 
 
 def test_rejects_non_recipe(tmp_path):

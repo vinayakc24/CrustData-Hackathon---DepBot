@@ -133,7 +133,8 @@ def test_happy_path_verifies_and_never_touches_source(job, tmp_path):
     saved = json.loads((art / "state.json").read_text())
     assert [h["to_status"] for h in saved["history"]] == [
         "INSPECTED", "RESEARCHED", "IMPACT_ANALYZED", "PLANNED", "PATCHED", "VERIFIED"]
-    assert state.baseline.phase == "baseline" and len(state.command_results) == 8
+    assert state.baseline.phase == "baseline" and state.probe.phase == "probe"
+    assert len(state.command_results) == 12  # baseline + probe + upgraded, 4 steps each
 
 
 def test_no_usages_bumps_manifest_and_reports_unaffected(job, tmp_path):
@@ -233,7 +234,7 @@ def _fails_until(n_good_after):
     calls = {"upgraded": 0}
 
     def verify(phase, **kw):
-        if phase == "baseline":
+        if phase in ("baseline", "probe"):
             return _passing(phase)
         calls["upgraded"] += 1
         if calls["upgraded"] > n_good_after:
@@ -291,3 +292,13 @@ def test_repair_giving_up_keeps_failure(job, tmp_path):
     state, _ = run_repository_job(job, _stages(verify=verify, repair=lambda **kw: []), artifacts_root=tmp_path / "a")
     assert state.status == JobStatus.FAILED_BUILD and "no repair proposed" in state.status_reason
     assert state.repair_attempts == 0
+
+
+@pytest.mark.real_tooling
+def test_missing_conan_blocks_job_before_any_edit(job, tmp_path, monkeypatch):
+    import depbot.package_managers.conan as conan_mod
+    monkeypatch.setattr(conan_mod.shutil, "which", lambda name: None)
+    state, outcome = run_repository_job(job, _stages(), artifacts_root=tmp_path / "a")
+    assert outcome.status == OutcomeStatus.BLOCKED
+    assert "conan tooling: conan executable not found on PATH" in state.status_reason
+    assert state.manifest_change is None and state.baseline is None

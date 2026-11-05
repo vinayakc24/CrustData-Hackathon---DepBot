@@ -53,9 +53,22 @@ class ChangeType(StrEnum):
 
 
 class AnalysisMethod(StrEnum):
+    """How a usage was found."""
+
     RIPGREP = "ripgrep"
     CLANG_AST = "clang_ast"
+    COMPILER_DIAGNOSTIC = "compiler_diagnostic"  # from the probe build against the new version
     MANUAL = "manual"
+
+
+class ResolutionLayer(StrEnum):
+    """Which impact-cascade layer settled a usage's verdict (see CONTRACTS.md §9)."""
+
+    TEXT_PREFILTER = "text_prefilter"  # I1: text match only, nothing proved yet
+    CLANG_AST = "clang_ast"  # I2: USR resolution
+    COMPILER_PROBE = "compiler_probe"  # I3: diagnostic from the probe build
+    LLM = "llm"  # I4: residual classified by the LLM (never 'definite')
+    HUMAN = "human"
 
 
 class ImpactLevel(StrEnum):
@@ -100,6 +113,7 @@ class PatchStatus(StrEnum):
 
 class VerificationPhase(StrEnum):
     BASELINE = "baseline"
+    PROBE = "probe"  # advisory build against the new version in a scratch copy (before planning)
     UPGRADED = "upgraded"
 
 
@@ -204,6 +218,7 @@ class UpgradePolicy(_Model):
     major_approved: bool = False
     minimum_migration_confidence: float = Field(default=0.80, ge=0.0, le=1.0)
     max_repair_attempts: int = Field(default=2, ge=0, le=3)
+    run_probe_build: bool = True  # build against the new version before planning (impact layer I3)
     refuse_dirty_worktree: bool = True
     create_pr_on_failure: bool = False
     auto_merge: bool = False
@@ -249,11 +264,19 @@ class CodeUsage(_Model):
     impact: ImpactLevel
     related_change_ids: list[str]
     confidence: float = Field(ge=0.0, le=1.0)
+    # Impact-cascade provenance (optional; filled by layers that can prove something).
+    resolved_by: ResolutionLayer | None = None
+    resolution_proof: str | None = None  # e.g. "references c:@N@toydep@F@old_sum#I#I#"
+    resolved_usr: str | None = None  # USR the reference resolves to (CLANG_AST)
+    declaration_file: str | None = None  # where that declaration lives (dependency header)
+    preprocessor_context: str | None = None  # e.g. "#ifdef _WIN32" for residuals
 
     @model_validator(mode="after")
     def _line_order(self) -> CodeUsage:
         if self.line_end < self.line_start:
             raise ValueError("line_end must be >= line_start")
+        if self.resolved_by == ResolutionLayer.LLM and self.impact == ImpactLevel.DEFINITE:
+            raise ValueError("an LLM classification can never make a usage 'definite'")
         return self
 
 
@@ -313,6 +336,18 @@ class CommandResult(_Model):
         return self.exit_code == 0 and not self.timed_out
 
 
+class CompilerDiagnostic(_Model):
+    """One structured compiler message (C's verification parses build output into these)."""
+
+    file_path: str | None  # repository-relative; None if outside the worktree (e.g. dependency header)
+    line: int | None = Field(default=None, ge=1)
+    column: int | None = Field(default=None, ge=1)
+    severity: str  # "error" | "warning" | "note" | "fatal error"
+    message: str
+    option: str | None = None  # e.g. "-Wdeprecated-declarations"
+    command_label: str  # e.g. "probe.build"
+
+
 class VerificationResult(_Model):
     """One verification pass (baseline or upgraded) of install/configure/build/test."""
 
@@ -326,6 +361,7 @@ class VerificationResult(_Model):
     failed_test_names: list[str] = Field(default_factory=list)
     passed: bool = False
     failure_category: str | None = None  # C's error-classifier label
+    diagnostics: list[CompilerDiagnostic] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _passed_needs_evidence(self) -> VerificationResult:
