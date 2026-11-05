@@ -88,7 +88,14 @@ Bounded LLM tasks (release interpretation, uncertain impact classification) use 
 --llm none                                   # default: deterministic stages only
 --llm fixture --llm-fixtures demo-llm.json   # recorded responses, offline and reproducible
 --llm anthropic [--llm-model MODEL]          # needs LLM_API_KEY (or ANTHROPIC_API_KEY)
+--llm gemini [--llm-model MODEL]             # needs GEMINI_API_KEY
 ```
+
+Gemini requests use Google's HTTPS Developer API and send `GEMINI_API_KEY` only
+in the `x-goog-api-key` header. Both production providers use `--llm-model` or
+`DEPBOT_LLM_MODEL` for model selection; Gemini defaults to `gemini-2.5-flash`.
+Structured responses are requested as JSON and validated locally against the
+stage's Pydantic schema.
 
 The API key is used only in the provider's request header. It is never passed to builds,
 prompts or logs.

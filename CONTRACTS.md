@@ -216,8 +216,13 @@ result = client.complete_structured(
   document; the fixture file belongs next to the demo config.
 - **Production:** `--llm anthropic [--llm-model M]` uses `depbot.llm.provider.AnthropicLLMClient`
   (stdlib HTTP, key from `LLM_API_KEY` or `ANTHROPIC_API_KEY`, model from `--llm-model` or
-  `$DEPBOT_LLM_MODEL`, default `claude-sonnet-5-5`). The CLI fails fast if no key is set. No tools are
-  offered to the model, and responses must be one JSON document matching the schema.
+  `$DEPBOT_LLM_MODEL`, default `claude-sonnet-5-5`). `--llm gemini [--llm-model M]` uses
+  `depbot.llm.gemini.GeminiLLMClient` with Google's Gemini Developer API over HTTPS. Gemini reads its
+  key exclusively from `GEMINI_API_KEY`, sends it in the `x-goog-api-key` header, and selects the model
+  from `--llm-model` or `$DEPBOT_LLM_MODEL` (default `gemini-2.5-flash`). The CLI fails fast if the
+  selected provider's key is missing. Both providers request JSON structured output, validate it
+  against the supplied Pydantic schema, use finite timeouts and bounded response bodies, and offer no
+  tools to the model.
 - **Default:** `--llm none` (or `$DEPBOT_LLM`). The deterministic demo must work in this mode or with fixtures.
 - `depbot.llm.runtime` imports only `depbot.llm.base`.
 
@@ -283,6 +288,8 @@ I1 ripgrep prefilter → I2 libclang USR resolution → I3 compiler probe → I4
   `CompilerDiagnostic` + `VerificationResult.diagnostics`, `VerificationPhase.PROBE`, `DepBotState.probe`,
   `UpgradePolicy.run_probe_build`; engine probe step and baseline compile-database capture;
   `command_env()` now always exports compile commands.
+- 0.4.1 — additive: `depbot.llm.gemini.GeminiLLMClient` and CLI `--llm gemini`; Gemini key is read only
+  from `GEMINI_API_KEY`, structured JSON is Pydantic-validated, and response reads are bounded.
 - 0.4.0 — additive: `depbot.llm.runtime` (`get_llm_client`, `current_llm_client`, `use_llm_client`,
   `LLMNotConfigured`, `fixture_factory`), production provider `depbot.llm.provider.AnthropicLLMClient`,
   CLI `--llm/--llm-fixtures/--llm-model`, and `run_repository_job(..., llm_factory=)` /
