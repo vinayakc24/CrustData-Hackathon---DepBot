@@ -91,6 +91,12 @@ Access uses your existing `git`/`gh` credentials. URLs with embedded credentials
 (`https://user:token@…`) are refused, and nothing is ever pushed except an explicit `--create-pr` branch.
 `depbot upgrade --repo https://github.com/acme/service-x …` works the same way.
 
+GitHub release API lookups use anonymous access by default. Setting `GITHUB_TOKEN`
+adds the token as a read-only API authorization header to raise the API rate limit;
+the token is not included in URLs, release evidence, or build environments. A
+`ReleaseWatch` may set `tag_prefix` (for example, `fmt-`) when upstream release
+tags include a package-specific prefix; emitted event versions omit that prefix.
+
 ### Single-repository fallback
 
 ```bash

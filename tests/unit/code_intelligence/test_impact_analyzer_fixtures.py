@@ -63,7 +63,7 @@ def _add_decoys(repo: Path) -> None:
         path.write_text("int main() { return old_sum(1, 2); }\n", encoding="utf-8")
 
 
-def test_fixture_repositories_report_only_clear_calls_as_definite(tmp_path: Path) -> None:
+def test_fixture_repositories_keep_text_only_matches_possible(tmp_path: Path) -> None:
     copies = _copy_fixtures(tmp_path / "copies")
     original_before = {name: _snapshot(FIXTURE_ROOT / name) for name in copies}
     _add_decoys(copies["repo_a"])
@@ -80,22 +80,18 @@ def test_fixture_repositories_report_only_clear_calls_as_definite(tmp_path: Path
     )
 
     for usages in (repo_a_usages, repo_b_usages):
-        definite = [usage for usage in usages if usage.impact == ImpactLevel.DEFINITE]
-        assert [(usage.symbol, usage.file_path, usage.line_start, usage.line_end) for usage in definite] == [
+        actual_calls = [usage for usage in usages if usage.file_path == "src/main.cpp" and usage.line_start == 4]
+        assert [(usage.symbol, usage.file_path, usage.line_start, usage.line_end) for usage in actual_calls] == [
             ("old_sum", "src/main.cpp", 4, 4)
         ]
-        assert definite[0].related_change_ids == [CHANGE_ID]
-        assert definite[0].confidence == 0.95
+        assert actual_calls[0].related_change_ids == [CHANGE_ID]
+        assert actual_calls[0].impact == ImpactLevel.POSSIBLE
+        assert actual_calls[0].confidence == 0.5
 
     assert repo_c_usages == []
 
-    # Source comments, declarations and literals remain uncertain. Excluded trees
-    # are not indexed at all, so none can become a definite source usage.
-    assert all(
-        usage.impact != ImpactLevel.DEFINITE
-        for usage in repo_a_usages
-        if usage.line_start != 4 or usage.file_path != "src/main.cpp"
-    )
+    # Text-only source comments, declarations and literals remain uncertain.
+    assert all(usage.impact != ImpactLevel.DEFINITE for usage in repo_a_usages)
     possible = [usage for usage in repo_a_usages if usage.impact == ImpactLevel.POSSIBLE]
     assert any("comment" in usage.snippet for usage in possible)
     assert any("example =" in usage.snippet for usage in possible)

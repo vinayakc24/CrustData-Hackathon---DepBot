@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 import urllib.error
 import urllib.parse
@@ -76,6 +77,14 @@ def _read_response(response, max_bytes: int) -> bytes:
     return b"".join(chunks)
 
 
+def _api_headers() -> dict[str, str]:
+    headers = {"Accept": "application/vnd.github+json", "User-Agent": "DepBot-release-research"}
+    token = os.environ.get("GITHUB_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
 def _parse_release(item: object) -> GitHubRelease:
     if not isinstance(item, dict):
         raise GitHubReleaseError("GitHub API returned a malformed release entry")
@@ -120,7 +129,7 @@ def get_latest_github_release(
 
     request = urllib.request.Request(
         f"https://api.github.com/repos/{repo}/releases/latest",
-        headers={"Accept": "application/vnd.github+json", "User-Agent": "DepBot-release-research"},
+        headers=_api_headers(),
     )
     opener = urllib.request.build_opener()
     try:
@@ -173,7 +182,7 @@ def find_github_release(
         url = f"https://api.github.com/repos/{repo}/releases?per_page={DEFAULT_PER_PAGE}&page={page}"
         request = urllib.request.Request(
             url,
-            headers={"Accept": "application/vnd.github+json", "User-Agent": "DepBot-release-research"},
+            headers=_api_headers(),
         )
         try:
             with opener.open(request, timeout=timeout_seconds) as response:

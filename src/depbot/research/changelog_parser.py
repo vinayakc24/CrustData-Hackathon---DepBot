@@ -56,37 +56,41 @@ def _normalize(version: str) -> str:
     return value[1:] if value.startswith("v") else value
 
 
-def find_version_section(changelog_text: str, target_version: str) -> ChangelogSection | None:
-    """Extract the exact requested Markdown version section, preserving text."""
-    if not isinstance(changelog_text, str) or not isinstance(target_version, str):
-        raise TypeError("changelog_text and target_version must be strings")
-    target = _normalize(target_version)
-    if not target:
-        raise ValueError("target_version must not be empty")
+def list_version_sections(changelog_text: str) -> list[ChangelogSection]:
+    """Return recognized version sections in source order, preserving their text."""
+    if not isinstance(changelog_text, str):
+        raise TypeError("changelog_text must be a string")
     lines = changelog_text.splitlines(keepends=True)
-    matches: list[tuple[int, str, str]] = []
     headings: list[tuple[int, str, str]] = []
     for index, line in enumerate(lines):
         parsed = _heading_version(line)
         if parsed is None:
             continue
         version, heading = parsed
-        normalized = _normalize(version)
         headings.append((index, version, heading))
-        if normalized == target:
-            matches.append((index, version, heading))
+    sections: list[ChangelogSection] = []
+    for heading_index, (index, version, heading) in enumerate(headings):
+        next_index = headings[heading_index + 1][0] if heading_index + 1 < len(headings) else len(lines)
+        content_lines = lines[index + 1:next_index]
+        sections.append(ChangelogSection(
+            version=version,
+            heading=heading,
+            content="".join(content_lines),
+            line_start=index + 1,
+            line_end=next_index,
+        ))
+    return sections
+
+
+def find_version_section(changelog_text: str, target_version: str) -> ChangelogSection | None:
+    """Extract the exact requested Markdown version section, preserving text."""
+    if not isinstance(target_version, str):
+        raise TypeError("target_version must be a string")
+    target = _normalize(target_version)
+    if not target:
+        raise ValueError("target_version must not be empty")
+    matches = [section for section in list_version_sections(changelog_text)
+               if _normalize(section.version) == target]
     if len(matches) > 1:
         raise ChangelogParseError(f"duplicate changelog sections for version {target_version!r}")
-    if not matches:
-        return None
-    index, version, heading = matches[0]
-    next_index = next((item[0] for item in headings if item[0] > index), len(lines))
-    content_lines = lines[index + 1:next_index]
-    end_line = index + len(content_lines) + 1
-    return ChangelogSection(
-        version=version,
-        heading=heading,
-        content="".join(content_lines),
-        line_start=index + 1,
-        line_end=end_line,
-    )
+    return matches[0] if matches else None

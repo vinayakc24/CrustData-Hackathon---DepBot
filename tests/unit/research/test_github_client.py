@@ -192,6 +192,19 @@ def test_latest_release_uses_bounded_latest_endpoint_and_preserves_fields(monkey
     assert opener.timeouts == [3]
 
 
+def test_optional_github_token_is_sent_in_header_only(monkeypatch) -> None:
+    token = "ghp_private_test_token"
+    monkeypatch.setenv("GITHUB_TOKEN", token)
+    opener = FakeOpener([_response([_release("v2.0.0")])])
+    _mock(monkeypatch, opener)
+
+    find_github_release(upstream_repo="acme/widget", target_version="2.0.0")
+
+    request = opener.requests[0]
+    assert request.get_header("Authorization") == f"Bearer {token}"
+    assert token not in request.full_url
+
+
 @pytest.mark.parametrize("updates, message", [
     ({"prerelease": True}, "prerelease"),
     ({"draft": True}, "draft"),

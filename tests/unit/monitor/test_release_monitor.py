@@ -29,8 +29,8 @@ def _release(tag: str, *, prerelease: bool = False) -> GitHubRelease:
     )
 
 
-def _watch(current: str = "1.0.0", repo: str = "acme/widget") -> ReleaseWatch:
-    return ReleaseWatch("widget", repo, current)
+def _watch(current: str = "1.0.0", repo: str = "acme/widget", tag_prefix: str = "") -> ReleaseWatch:
+    return ReleaseWatch("widget", repo, current, tag_prefix=tag_prefix)
 
 
 def _mock_release(monkeypatch, release: GitHubRelease) -> None:
@@ -71,6 +71,24 @@ def test_normalizes_only_leading_version_prefix(monkeypatch) -> None:
     assert event is not None
     assert event.target_version == "2.0.0+meta.1"
     assert event.source_url == release.html_url
+
+
+def test_configured_tag_prefix_is_removed_for_version_comparison(monkeypatch) -> None:
+    release = _release("fmt-11.0.2")
+    _mock_release(monkeypatch, release)
+
+    event = poll_release_watch(_watch("11.0.1", tag_prefix="fmt-"))
+
+    assert event is not None
+    assert event.target_version == "11.0.2"
+    assert event.event_id.endswith(":fmt-11.0.2")
+    assert event.source_url == release.html_url
+
+
+def test_configured_tag_prefix_mismatch_is_reported(monkeypatch) -> None:
+    _mock_release(monkeypatch, _release("v2.0.0"))
+    with pytest.raises(ReleaseMonitorError, match="does not start with configured prefix"):
+        poll_release_watch(_watch("1.0.0", tag_prefix="fmt-"))
 
 
 def test_unparseable_current_or_release_version_is_clear(monkeypatch) -> None:

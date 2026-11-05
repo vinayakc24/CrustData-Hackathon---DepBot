@@ -25,6 +25,7 @@ class ReleaseWatch:
     dependency_name: str
     upstream_repo: str
     current_version: str
+    tag_prefix: str = ""
 
 
 @dataclass(frozen=True)
@@ -43,7 +44,13 @@ class _StopEvent(Protocol):
     def wait(self, timeout: float) -> bool: ...
 
 
-def _normalize_version(version: str) -> str:
+def _normalize_version(version: str, *, tag_prefix: str = "", require_prefix: bool = False) -> str:
+    if tag_prefix and version.startswith(tag_prefix):
+        version = version[len(tag_prefix):]
+    elif tag_prefix and require_prefix:
+        raise ReleaseMonitorError(
+            f"release tag {version!r} does not start with configured prefix {tag_prefix!r}"
+        )
     return version[1:] if version.startswith("v") else version
 
 
@@ -60,8 +67,8 @@ def poll_release_watch(watch: ReleaseWatch) -> ReleaseEvent | None:
             f"GitHub returned a prerelease for {watch.dependency_name} at {watch.upstream_repo}"
         )
 
-    current = _normalize_version(watch.current_version)
-    target = _normalize_version(release.tag_name)
+    current = _normalize_version(watch.current_version, tag_prefix=watch.tag_prefix)
+    target = _normalize_version(release.tag_name, tag_prefix=watch.tag_prefix, require_prefix=True)
     try:
         is_newer = compare(current, target) < 0
     except UnparseableVersion as exc:

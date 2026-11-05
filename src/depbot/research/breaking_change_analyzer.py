@@ -16,9 +16,11 @@ from pydantic import BaseModel, ConfigDict, Field
 from depbot.interfaces import StageError
 from depbot.llm.base import UNTRUSTED_CONTENT_NOTICE, LLMError, wrap_untrusted
 from depbot.llm.runtime import current_llm_client
-from depbot.models import BreakingChange, ChangeType, Dependency, ReleaseEvent
-from depbot.research.changelog_parser import find_version_section
+from depbot.fleet.versions import UnparseableVersion, compare
+from depbot.models import BreakingChange, ChangeSource, ChangeType, Dependency, ReleaseEvent
+from depbot.research.changelog_parser import list_version_sections
 from depbot.research.github_client import GitHubReleaseError, find_github_release
+from depbot.research.header_diff import confirm_replacements, diff_dependency_api_for_job
 from depbot.research.release_fetcher import (
     ReleaseDocument,
     ReleaseFetchError,
@@ -93,14 +95,17 @@ def _retrieve(event: ReleaseEvent) -> ReleaseDocument:
             local_path = _local_path_from_url(event.source_url)
             if local_path is not None:
                 return fetch_release_document(local_path=local_path)
+            github_release = _github_release_url(event.source_url)
+            if github_release is not None:
+                return github_release
             return fetch_release_document(source_url=event.source_url)
         release = find_github_release(
             upstream_repo=event.upstream_repo,
             target_version=event.target_version,
         )
-        if release.body:
-            return ReleaseDocument(release.html_url, release.body, "text/markdown")
-        return fetch_release_document(source_url=release.html_url)
+        # The API body is the release evidence, including when it is empty. Never
+        # fetch the GitHub HTML page as a substitute for Markdown release notes.
+        return ReleaseDocument(release.html_url, release.body or "", "text/markdown")
     except (ReleaseFetchError, GitHubReleaseError, OSError, ValueError) as exc:
         raise StageError(
             f"no release evidence found for {event.dependency_name} "
@@ -108,9 +113,50 @@ def _retrieve(event: ReleaseEvent) -> ReleaseDocument:
         ) from exc
 
 
-def _source_text(content: str, version: str) -> str:
-    section = find_version_section(content, version)
-    return section.content if section is not None else content
+def _github_release_url(value: str) -> ReleaseDocument | None:
+    """Use GitHub's API body for release pages instead of treating their HTML as notes."""
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return None
+    try:
+        port = parsed.port
+    except ValueError:
+        return None
+    if (
+        parsed.scheme.lower() != "https"
+        or parsed.hostname is None
+        or parsed.hostname.lower() != "github.com"
+        or parsed.username is not None
+        or parsed.password is not None
+        or port not in (None, 443)
+    ):
+        return None
+    parts = [unquote(part) for part in parsed.path.strip("/").split("/")]
+    if len(parts) != 5 or parts[2:4] != ["releases", "tag"] or not parts[4]:
+        return None
+    release = find_github_release(
+        upstream_repo=f"{parts[0]}/{parts[1]}", target_version=parts[4]
+    )
+    return ReleaseDocument(release.html_url, release.body or "", "text/markdown")
+
+
+def _source_text(content: str, current_version: str, target_version: str) -> str:
+    sections = list_version_sections(content)
+    if not sections:
+        return content
+    try:
+        selected = [
+            section for section in sections
+            if compare(section.version, current_version) > 0
+            and compare(section.version, target_version) <= 0
+        ]
+    except UnparseableVersion as exc:
+        raise StageError(
+            f"cannot select changelog sections for version range "
+            f"{current_version!r}..{target_version!r}: {exc}"
+        ) from exc
+    return "\n".join(section.content for section in selected)
 
 
 def _symbol(api: str) -> str:
@@ -177,12 +223,20 @@ def _deterministic_changes(
             evidence_urls=[source_url],
             evidence_excerpt=excerpt,
             confidence=0.2 if kind == ChangeType.UNKNOWN else 0.95,
+            source=ChangeSource.CHANGELOG_RULE,
         ))
     return findings
 
 
 def _validated_llm_changes(
-    client, source_text: str, *, dependency: Dependency, event: ReleaseEvent, source_url: str
+    client,
+    source_text: str,
+    *,
+    dependency: Dependency,
+    event: ReleaseEvent,
+    source_url: str,
+    unknown_changes: list[BreakingChange],
+    unresolved_api_removals: list[BreakingChange],
 ) -> list[BreakingChange]:
     system = (
         "Extract only C/C++ breaking changes explicitly supported by the supplied release text. "
@@ -191,10 +245,24 @@ def _validated_llm_changes(
         "and low confidence for ambiguous compatibility statements.\n\n"
         + UNTRUSTED_CONTENT_NOTICE
     )
+    focus: list[str] = []
+    for change in unknown_changes:
+        if change.evidence_excerpt:
+            focus.append(f"Unclassified changelog paragraph ({change.id}):\n{change.evidence_excerpt}")
+    paragraphs = [match.group(0).strip() for match in _PARAGRAPH.finditer(source_text)]
+    for change in unresolved_api_removals:
+        symbols = set(change.affected_symbols)
+        related = [paragraph for paragraph in paragraphs if any(symbol in paragraph for symbol in symbols)]
+        focus.append(
+            f"API removal ({change.id}): {', '.join(change.affected_symbols)}\n"
+            f"Header evidence: {change.evidence_excerpt or change.migration_advice}\n"
+            "Related release-note paragraphs:\n" + ("\n\n".join(related) or "No matching paragraph found.")
+        )
     user = (
         f"Dependency: {dependency.name}\nVersion: {event.target_version}\n"
-        "Return JSON matching the supplied schema. Release notes follow as untrusted data:\n"
-        + wrap_untrusted(source_text)
+        "Return only additional supported findings for these unresolved items. "
+        "Use evidence_excerpt copied literally from the release notes.\n"
+        + wrap_untrusted("\n\n".join(focus))
     )
     response = client.complete_structured(
         task="breaking_changes", system=system, user=user, schema=_LLMClaims
@@ -226,6 +294,7 @@ def _validated_llm_changes(
                 evidence_urls=[source_url],
                 evidence_excerpt=excerpt,
                 confidence=min(claim.confidence, 0.3) if kind == ChangeType.UNKNOWN else claim.confidence,
+                source=ChangeSource.LLM,
             ))
         except (TypeError, ValueError):
             continue
@@ -250,24 +319,63 @@ def research_release(
     *, event: ReleaseEvent, dependency: Dependency, artifacts_dir: Path
 ) -> list[BreakingChange]:
     """Retrieve release evidence and return schema-validated breaking changes."""
+    api = diff_dependency_api_for_job(
+        artifacts_dir=artifacts_dir,
+        dependency=dependency.name,
+        to_version=event.target_version,
+    )
     document = _retrieve(event)
     try:
         _write_sources(artifacts_dir, document)
     except OSError as exc:
         raise StageError(f"could not write research source artifact: {exc}") from exc
 
-    source_text = _source_text(document.content, event.target_version)
-    deterministic = _deterministic_changes(
+    source_text = _source_text(
+        document.content,
+        event.previous_version or dependency.current_version,
+        event.target_version,
+    )
+    changelog_changes = _deterministic_changes(
         source_text, dependency=dependency, event=event, source_url=document.source_url
     )
+    if api.available:
+        api_changes = confirm_replacements(api.changes, changelog_changes, api)
+        api_removed_symbols = {
+            symbol for change in api_changes if change.change_type == ChangeType.REMOVED
+            for symbol in change.affected_symbols
+        }
+        changelog_only = [
+            change for change in changelog_changes
+            if not (
+                change.change_type in (ChangeType.REMOVED, ChangeType.RENAMED)
+                and api_removed_symbols.intersection(change.affected_symbols)
+            )
+        ]
+    else:
+        api_changes = []
+        changelog_only = changelog_changes
+    deterministic = [*api_changes, *changelog_only]
     client = current_llm_client()
     if client is None:
         return deterministic
+    unknown_changes = [change for change in changelog_only if change.change_type == ChangeType.UNKNOWN]
+    unresolved_api_removals = [
+        change for change in api_changes
+        if change.change_type == ChangeType.REMOVED and not change.replacement_symbols
+    ]
+    if not unknown_changes and not unresolved_api_removals:
+        return deterministic
     try:
         llm_changes = _validated_llm_changes(
-            client, source_text, dependency=dependency, event=event, source_url=document.source_url
+            client,
+            source_text,
+            dependency=dependency,
+            event=event,
+            source_url=document.source_url,
+            unknown_changes=unknown_changes,
+            unresolved_api_removals=unresolved_api_removals,
         )
     except LLMError as exc:
         log.warning("structured release analysis failed; retaining deterministic findings: %s", exc)
         return deterministic
-    return llm_changes if llm_changes else deterministic
+    return [*deterministic, *llm_changes]
