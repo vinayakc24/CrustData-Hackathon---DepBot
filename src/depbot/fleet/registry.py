@@ -20,6 +20,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from depbot.models import ReleaseEvent, RepositoryRecord, UpgradePolicy
+from depbot.repository.remote import RemoteRepositoryError, SyncResult, is_remote, sync_remote
 
 
 class RegistryError(ValueError):
@@ -76,14 +77,29 @@ class Fleet:
         return self.config.policies[repo.policy_id or self.config.default_policy_id]
 
     def local_root(self, repo: RepositoryRecord) -> Path:
-        """Absolute local path of a registered repository. Remote URLs are P1."""
+        """Absolute local path of a locally registered repository (no network access)."""
         ref = repo.repo_url_or_path
-        if "://" in ref or ref.startswith("git@"):
-            raise RegistryError(f"{repo.repository_id}: remote repositories are not supported yet")
+        if is_remote(ref):
+            raise RegistryError(
+                f"{repo.repository_id}: remote repository needs a sync (use resolve_root with a sources dir)"
+            )
         path = Path(ref).expanduser()
         if not path.is_absolute():
             path = self.base_dir / path
         return path.resolve()
+
+    def resolve_root(self, repo: RepositoryRecord, sources_dir: Path | None) -> tuple[Path, SyncResult | None]:
+        """Local path to read the repository from. A remote repository is cloned or
+        fetched into ``sources_dir`` (its DepBot-owned cache) first."""
+        if not is_remote(repo.repo_url_or_path):
+            return self.local_root(repo), None
+        if sources_dir is None:
+            raise RegistryError(f"{repo.repository_id}: remote repositories need a state directory to sync into")
+        try:
+            result = sync_remote(repo, sources_dir)
+        except RemoteRepositoryError as exc:
+            raise RegistryError(f"{repo.repository_id}: {exc}") from exc
+        return Path(result.path), result
 
 
 def _load_yaml(path: Path) -> dict:

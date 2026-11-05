@@ -100,7 +100,9 @@ def run_fleet(
     fleet_dir = (artifacts_root / f"fleet-{event.event_id}-{stamp}-{secrets.token_hex(3)}").resolve()
     fleet_dir.mkdir(parents=True, exist_ok=False)
 
-    selections = select_repositories(event, fleet, DependencyIndex(state_dir / "inventory.json"))
+    selections = select_repositories(
+        event, fleet, DependencyIndex(state_dir / "inventory.json"), sources_dir=state_dir / "sources"
+    )
     (fleet_dir / "selection.json").write_text(
         json.dumps([s.model_dump(mode="json") for s in selections], indent=2) + "\n", encoding="utf-8"
     )
