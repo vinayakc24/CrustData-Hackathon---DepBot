@@ -151,11 +151,24 @@ def test_release_migrates_two_repositories_and_skips_current_one(tmp_path: Path,
         assert "1 passed, 0 failed" in report
         state = json.loads((report_path.parent / "state.json").read_text(encoding="utf-8"))
         commands = {result["command_label"]: result for result in state["command_results"]}
-        for phase in ("baseline", "probe", "upgraded"):
+        # Baseline (old version) and upgraded (migrated code) must fully pass.
+        for phase in ("baseline", "upgraded"):
             for step, executable in expected_commands.items():
                 result = commands[f"{phase}.{step}"]
                 assert result["exit_code"] == 0, result
                 assert not result["timed_out"], result
                 assert Path(result["args"][0]).name.lower().startswith(executable), result
+        # The probe builds the *unmigrated* code against the new version: install and
+        # configure succeed, the build must fail, and its diagnostics locate the break.
+        for step in ("dependency_install", "configure"):
+            assert commands[f"probe.{step}"]["exit_code"] == 0, commands[f"probe.{step}"]
+        probe_build = commands["probe.build"]
+        assert probe_build["exit_code"] not in (0, None), probe_build
+        assert "probe.tests" not in commands  # tests never run on a failed build
+        errors = [d for d in state["probe"]["diagnostics"] if d["severity"] == "error"]
+        assert errors and errors[0]["file_path"] == "src/main.cpp", state["probe"]["diagnostics"]
+        assert "old_sum" in errors[0]["message"]
+        probe_diagnostics = json.loads((report_path.parent / "probe" / "diagnostics.json").read_text())
+        assert probe_diagnostics == state["probe"]["diagnostics"]
     # repo_c is selected as already current before research or verification starts.
     assert "2.0.0" not in research_versions
