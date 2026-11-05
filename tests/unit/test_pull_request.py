@@ -24,7 +24,7 @@ class FakeRunner:
             return subprocess.CompletedProcess(args, 0 if ok else 2, self.remote or "", "" if ok else "no origin")
         if args[:2] == ["git", "push"]:
             return subprocess.CompletedProcess(args, self.push_rc, "", "denied" if self.push_rc else "")
-        if args[:3] == ["gh", "pr", "create"]:
+        if args[:4] == ["gh", "api", "--method", "POST"]:
             out = "https://github.com/acme/repo_a/pull/7\n" if self.gh_rc == 0 else ""
             return subprocess.CompletedProcess(args, self.gh_rc, out, "" if self.gh_rc == 0 else "gh: no auth")
         raise AssertionError(f"unexpected command {args}")
@@ -65,8 +65,9 @@ def test_publish_pushes_branch_and_opens_pr_without_merge(job, tmp_path):
     assert result.published and result.url == "https://github.com/acme/repo_a/pull/7"
     push, create = fake.calls[1], fake.calls[2]
     assert push == ["git", "push", "https://github.com/acme/repo_a.git", "HEAD:refs/heads/depbot/toydep-2.0.0"]
-    assert create[:6] == ["gh", "pr", "create", "--repo", "acme/repo_a", "--head"]
-    assert "--base" in create and create[create.index("--base") + 1] == "main"
+    assert create[:5] == ["gh", "api", "--method", "POST", "repos/acme/repo_a/pulls"]
+    assert "head=depbot/toydep-2.0.0" in create and "base=main" in create
+    assert any(a.startswith("body=@") and a.endswith("pr-body.md") for a in create)
     assert not any("merge" in a for call in fake.calls for a in call)
 
 
@@ -74,7 +75,7 @@ def test_publish_pushes_branch_and_opens_pr_without_merge(job, tmp_path):
     (FakeRunner(remote=None), "no GitHub 'origin' remote"),
     (FakeRunner(remote="/local/path/repo"), "no GitHub 'origin' remote"),
     (FakeRunner(push_rc=1), "git push failed"),
-    (FakeRunner(gh_rc=1), "gh pr create failed"),
+    (FakeRunner(gh_rc=1), "PR creation failed"),
 ])
 def test_publish_failures_are_explained(job, tmp_path, runner, note):
     state, _ = run_repository_job(job, _stages(), artifacts_root=tmp_path / "a")
@@ -99,5 +100,4 @@ def test_create_pr_on_git_repo_opens_pr(job, tmp_path, monkeypatch):
     assert state.status == JobStatus.PR_CREATED, state.status_reason
     assert outcome.status == OutcomeStatus.VERIFIED and outcome.pr_url.endswith("/pull/7")
     assert state.repo_facts["working_copy"]["mode"] == "clone"
-    create = fake.calls[-1]
-    assert create[create.index("--base") + 1] == "main"
+    assert "base=main" in fake.calls[-1]

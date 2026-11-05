@@ -1,0 +1,14 @@
+# Real GitHub PR demo: the repository is registered by URL; DepBot clones it into its
+# cache, migrates the `demo/toydep-service` branch, verifies it, pushes
+# `depbot/toydep-2.0.0` and opens a PR into that branch with `--create-pr`.
+fleet_id: github-pr-demo
+default_policy_id: demo
+policies:
+  demo:
+    allowed_change_levels: [patch, minor, major]
+    require_human_approval_for_major: true
+repositories:
+  - repository_id: toydep_service
+    display_name: toydep demo service (GitHub)
+    repo_url_or_path: https://github.com/harsh121205/CrustData-Hackathon---DepBot
+    default_branch: demo/toydep-service
