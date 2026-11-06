@@ -5,7 +5,7 @@ from __future__ import annotations
 from pydantic import BaseModel, ConfigDict, Field
 
 from depbot.fleet.versions import change_level
-from depbot.models import BreakingChange, ChangeLevel, PlannedChange, UpgradePolicy
+from depbot.models import BreakingChange, ChangeLevel, CodeUsage, ImpactLevel, PlannedChange, UpgradePolicy
 
 
 class PolicyDecision(BaseModel):
@@ -52,14 +52,33 @@ def pre_migration_gate(policy: UpgradePolicy, current: str, target: str) -> Poli
 
 
 def plan_confidence_gate(
-    policy: UpgradePolicy, changes: list[BreakingChange], plan: list[PlannedChange]
+    policy: UpgradePolicy, changes: list[BreakingChange], plan: list[PlannedChange],
+    usages: list[CodeUsage] | None = None,
 ) -> PolicyDecision:
+    """Every change the migration relies on, and every planned edit, must meet the threshold.
+
+    With ``usages``, a change is relied on when a planned edit or a definite/possible usage in
+    this repository cites it. Low-confidence changes nothing here uses (a real release has many:
+    unclassified changelog paragraphs, header-diff entries for macros the repo never touches)
+    are recorded but do not block; the upgraded build and tests still have to pass.
+    Without ``usages`` every change is checked (the strict, pre-0.9 behaviour).
+    """
     threshold = policy.minimum_migration_confidence
-    low = [f"breaking change {c.id} confidence {c.confidence:.2f}" for c in changes if c.confidence < threshold]
+    if usages is None:
+        relied = {c.id for c in changes}
+    else:
+        relied = {cid for p in plan for cid in p.related_change_ids}
+        relied |= {cid for u in usages if u.impact in (ImpactLevel.DEFINITE, ImpactLevel.POSSIBLE)
+                   for cid in u.related_change_ids}
+    low = [f"breaking change {c.id} confidence {c.confidence:.2f}" for c in changes
+           if c.id in relied and c.confidence < threshold]
     low += [f"planned edit {p.file_path} confidence {p.confidence:.2f}" for p in plan if p.confidence < threshold]
+    unused = sorted(c.id for c in changes if c.id not in relied and c.confidence < threshold)
     reasons = [f"below minimum {threshold:.2f}: {item}" for item in low] or [
-        f"all changes and planned edits meet confidence >= {threshold:.2f}"
+        f"all relied-on changes and planned edits meet confidence >= {threshold:.2f}"
     ]
+    if unused:
+        reasons.append(f"not used by this repository, not gating ({len(unused)} low-confidence): {', '.join(unused)}")
     return PolicyDecision(
         gate="plan_confidence", allowed=not low, policy_id=policy.policy_id, reasons=reasons
     )
