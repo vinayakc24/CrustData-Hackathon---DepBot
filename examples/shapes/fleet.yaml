@@ -1,0 +1,43 @@
+# Repository-shape corpus: one toydep 1.0.0 -> 2.0.0 event across repos that differ
+# in manifest, layout and code shape. `expect` is what a correct DepBot does.
+fleet_id: shapes
+default_policy_id: demo
+policies:
+  demo:
+    allowed_change_levels: [patch, minor, major]
+    require_human_approval_for_major: true
+    max_repair_attempts: 2
+repositories:
+  - repository_id: s01_multi_requires
+    display_name: "VERIFIED; only the toydep line changes, comments and otherdep untouched"
+    repo_url_or_path: repos/s01_multi_requires
+  - repository_id: s02_lockfile
+    display_name: "VERIFIED with conan.lock updated to toydep/2.0.0 (P0: retain relevant lockfile changes)"
+    repo_url_or_path: repos/s02_lockfile
+  - repository_id: s03_version_range
+    display_name: "safe refusal: version range cannot be updated safely"
+    repo_url_or_path: repos/s03_version_range
+  - repository_id: s04_conanfile_py
+    display_name: "safe refusal: conanfile.py is executable"
+    repo_url_or_path: repos/s04_conanfile_py
+  - repository_id: s05_header_and_tests
+    display_name: "VERIFIED; usages in include/ and tests/ patched"
+    repo_url_or_path: repos/s05_header_and_tests
+  - repository_id: s06_no_tests
+    display_name: "not VERIFIED: policy requires tests"
+    repo_url_or_path: repos/s06_no_tests
+  - repository_id: s07_baseline_broken
+    display_name: "BLOCKED/failed at baseline; upgrade not blamed, no edits"
+    repo_url_or_path: repos/s07_baseline_broken
+  - repository_id: s08_crlf
+    display_name: "VERIFIED; CRLF line endings preserved"
+    repo_url_or_path: repos/s08_crlf
+  - repository_id: s09_no_code_usage
+    display_name: "VERIFIED with only the manifest bumped"
+    repo_url_or_path: repos/s09_no_code_usage
+  - repository_id: s10_comments_and_strings
+    display_name: "VERIFIED with only the manifest bumped; comment and string untouched"
+    repo_url_or_path: repos/s10_comments_and_strings
+  - repository_id: s11_using_declaration
+    display_name: "VERIFIED; the using-declaration patched (or honest failure + repair)"
+    repo_url_or_path: repos/s11_using_declaration

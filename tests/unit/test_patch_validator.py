@@ -61,3 +61,23 @@ def test_declared_paths_must_match_diff_paths(tmp_path: Path):
     patch = patch.model_copy(update={"files": ["README.md"]})
     result = validate_and_apply(worktree=worktree, patch=patch, allowed_paths=["src", "README.md"])
     assert result.status == PatchStatus.REJECTED
+
+
+def test_crlf_file_patch_is_not_rejected_as_trailing_whitespace(tmp_path):
+    import subprocess
+
+    from depbot.migration.patch_validator import validate_and_apply
+    from depbot.models import PatchStatus, SourcePatch
+
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "main.cpp").write_bytes(b"int main() {\r\n    return old_sum(2, 3);\r\n}\r\n")
+    git = ["git", "-c", "user.name=t", "-c", "user.email=t@t"]
+    subprocess.run([*git, "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run([*git, "add", "-A"], cwd=tmp_path, check=True)
+    subprocess.run([*git, "commit", "-qm", "i"], cwd=tmp_path, check=True)
+    diff = ("diff --git a/src/main.cpp b/src/main.cpp\n--- a/src/main.cpp\n+++ b/src/main.cpp\n"
+            "@@ -1,3 +1,3 @@\n int main() {\r\n-    return old_sum(2, 3);\r\n+    return sum(2, 3);\r\n }\r\n")
+    patch = SourcePatch(patch_id="p1", files=["src/main.cpp"], unified_diff=diff, related_change_ids=["BC1"])
+    result = validate_and_apply(worktree=tmp_path, patch=patch, allowed_paths=["src"])
+    assert result.status == PatchStatus.APPLIED, result.rejection_reason
+    assert (tmp_path / "src" / "main.cpp").read_bytes() == b"int main() {\r\n    return sum(2, 3);\r\n}\r\n"

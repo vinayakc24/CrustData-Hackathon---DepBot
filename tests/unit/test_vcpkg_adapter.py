@@ -228,3 +228,10 @@ def test_engine_blocks_vcpkg_job_when_tooling_missing(tmp_path, monkeypatch):
     assert outcome.status == OutcomeStatus.BLOCKED and "vcpkg tooling" in state.status_reason
     assert state.manifest_change is None
     assert '"1.0.0"' in (repo / "vcpkg.json").read_text()
+
+
+def test_crlf_manifest_keeps_crlf_and_every_other_byte(tmp_path):
+    crlf = MANIFEST.replace("\n", "\r\n").encode()
+    (tmp_path / "vcpkg.json").write_bytes(crlf)
+    VcpkgAdapter().update_dependency(tmp_path, "toydep", "2.0.0")
+    assert (tmp_path / "vcpkg.json").read_bytes() == crlf.replace(b'"version>=": "1.0.0" }', b'"version>=": "2.0.0" }', 1)

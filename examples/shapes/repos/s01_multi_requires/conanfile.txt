@@ -1,0 +1,12 @@
+# service dependencies
+[requires]
+otherdep/1.0.0
+# the adder
+toydep/1.0.0
+
+[generators]
+CMakeDeps
+CMakeToolchain
+
+[layout]
+cmake_layout

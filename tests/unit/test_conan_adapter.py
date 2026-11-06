@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from depbot.package_managers.base import AmbiguousDependency, DependencyNotFound, UnsupportedManifest
@@ -88,3 +90,50 @@ def test_install_args_are_argv_lists(repo):
         "conan", "install", ".", "--build=missing", "-s", "build_type=Debug"
     ]
     assert adapter.cmake_preset(build_type="Release") == "conan-release"
+
+
+# ---- repository-shape robustness (examples/shapes; real run in tests/e2e/test_repo_shapes.py)
+
+def _conan_repo(tmp_path, text, lock=None):
+    (tmp_path / "conanfile.txt").write_bytes(text.encode())
+    if lock is not None:
+        (tmp_path / "conan.lock").write_text(json.dumps(lock, indent=4) + "\n")
+    return tmp_path
+
+
+def test_crlf_conanfile_is_edited_byte_exactly(tmp_path):
+    text = "[requires]\r\notherdep/1.0.0\r\ntoydep/1.0.0\r\n\r\n[generators]\r\nCMakeDeps\r\n"
+    repo = _conan_repo(tmp_path, text)
+    ConanAdapter().update_dependency(repo, "toydep", "2.0.0")
+    assert (repo / "conanfile.txt").read_bytes() == text.replace("toydep/1.0.0", "toydep/2.0.0").encode()
+
+
+def test_version_range_refusal_names_the_range(tmp_path):
+    repo = _conan_repo(tmp_path, "[requires]\ntoydep/[>=1.0 <2.0]\n")
+    with pytest.raises(UnsupportedManifest, match="version range .* cannot be updated safely"):
+        ConanAdapter().read_dependencies(repo)
+
+
+def test_lockfile_unpins_only_the_upgraded_dependency(tmp_path):
+    lock = {"version": "0.5", "requires": ["toydep/1.0.0#aa%1", "otherdep/1.0.0#bb%2", "toydep_extra/3.0#cc%3"],
+            "build_requires": ["toydep/1.0.0#aa%1"], "python_requires": [], "config_requires": []}
+    repo = _conan_repo(tmp_path, "[requires]\notherdep/1.0.0\ntoydep/1.0.0\n", lock)
+    adapter = ConanAdapter()
+    assert adapter.lockfiles(repo) == ["conan.lock"]
+    adapter.update_dependency(repo, "toydep", "2.0.0")
+    after = json.loads((repo / "conan.lock").read_text())
+    assert after["requires"] == ["otherdep/1.0.0#bb%2", "toydep_extra/3.0#cc%3"] and after["build_requires"] == []
+    assert adapter.install_args(repo)[-5:] == ["--lockfile", "conan.lock", "--lockfile-partial",
+                                                "--lockfile-out", "conan.lock"]
+
+
+def test_no_lockfile_means_plain_install(tmp_path):
+    repo = _conan_repo(tmp_path, "[requires]\ntoydep/1.0.0\n")
+    assert ConanAdapter().lockfiles(repo) == [] and "--lockfile" not in ConanAdapter().install_args(repo)
+
+
+def test_invalid_lockfile_is_a_safe_refusal(tmp_path):
+    repo = _conan_repo(tmp_path, "[requires]\ntoydep/1.0.0\n")
+    (repo / "conan.lock").write_text("{not json")
+    with pytest.raises(UnsupportedManifest, match="conan.lock is not valid JSON"):
+        ConanAdapter().update_dependency(repo, "toydep", "2.0.0")

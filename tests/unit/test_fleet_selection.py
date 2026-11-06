@@ -150,3 +150,12 @@ def test_cli_plan_and_status(fleet_dir, capsys):
     assert main(["fleet", "status", *args]) == 0
     assert "toydep/2.0.0 (conan)" in capsys.readouterr().out
     assert main(["fleet", "status", "--fleet", str(fleet_dir / "missing.yaml")]) == 2
+
+
+def test_scan_cache_key_includes_scanner_version(tmp_path, monkeypatch):
+    import depbot.fleet.dependency_index as index
+
+    (tmp_path / "conanfile.txt").write_text("[requires]\ntoydep/1.0.0\n")
+    first = index._manifest_digest(tmp_path)
+    monkeypatch.setattr(index, "SCANNER_VERSION", "999")
+    assert index._manifest_digest(tmp_path) != first  # a parser fix re-scans cached refusals

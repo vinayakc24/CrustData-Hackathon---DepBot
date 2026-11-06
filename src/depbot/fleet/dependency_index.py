@@ -29,10 +29,14 @@ class RepositoryScan(BaseModel):
     error: str | None = None  # explained refusal from the package-manager adapter
 
 
+# Bump when manifest parsing changes, so cached scans (and refusals) are redone.
+SCANNER_VERSION = "2"
+
+
 def _manifest_digest(root: Path) -> str | None:
-    digest = hashlib.sha256()
+    digest = hashlib.sha256(f"scanner-{SCANNER_VERSION}\0".encode())
     found = False
-    for name in ("conanfile.txt", "conanfile.py", "vcpkg.json", "vcpkg-configuration.json"):
+    for name in ("conanfile.txt", "conanfile.py", "conan.lock", "vcpkg.json", "vcpkg-configuration.json"):
         path = root / name
         if path.is_file():
             found = True

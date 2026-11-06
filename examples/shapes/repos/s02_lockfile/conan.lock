@@ -1,0 +1,9 @@
+{
+    "version": "0.5",
+    "requires": [
+        "toydep/1.0.0#48b967f8558450bfd2b6c5f1ce07b5d8%1793923107.5011942"
+    ],
+    "build_requires": [],
+    "python_requires": [],
+    "config_requires": []
+}
