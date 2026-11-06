@@ -38,7 +38,8 @@ UNPINNED = "unpinned(builtin-baseline)"
 CONFIG_NAME = "vcpkg-configuration.json"
 INSTALL_DIR = "vcpkg_installed"
 _SAFE_VERSION = re.compile(r"[A-Za-z0-9_.+-]+")
-_PASS_ENV = ("VCPKG_ROOT", "VCPKG_DEFAULT_TRIPLET", "VCPKG_DEFAULT_HOST_TRIPLET", "VCPKG_DEFAULT_BINARY_CACHE")
+_PASS_ENV = ("VCPKG_ROOT", "VCPKG_DEFAULT_TRIPLET", "VCPKG_DEFAULT_HOST_TRIPLET", "VCPKG_DEFAULT_BINARY_CACHE",
+             "VCPKG_FORCE_SYSTEM_BINARIES", "VCPKG_DOWNLOADS")  # ARM Linux needs FORCE_SYSTEM_BINARIES
 
 JsonPath = tuple[str | int, ...]
 

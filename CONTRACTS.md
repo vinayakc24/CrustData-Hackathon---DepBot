@@ -1,4 +1,4 @@
-# DepBot Contract Handoff — v0.8.0
+# DepBot Contract Handoff — v0.8.1
 
 Owner: **Member A**. These contracts are frozen for the first end-to-end demo.
 B and C implement against them; if you need a change, propose it to A (field,
@@ -334,6 +334,11 @@ target, not just the target version's section.
 
 ## 7. Change log
 
+- 0.8.1 — the plan-confidence gate (`plan_confidence_gate(..., usages)`) judges only the changes the
+  migration relies on: those cited by a planned edit or by a definite/possible usage. Low-confidence
+  changes this repository never uses are listed in the decision's reasons but don't block. Found on the
+  real fmt 6.2.1 → 7.0.0 run, where unrelated macro header-diff entries and unclassified changelog
+  paragraphs blocked a correct migration. Passing `usages=None` keeps the strict check.
 - 0.8.0 — additive:
   - **`UpgradePolicy.build_configurations`** (default `["Release"]`): each verification phase (baseline,
     probe, upgraded) installs, configures, builds and tests every listed configuration, and passes only if

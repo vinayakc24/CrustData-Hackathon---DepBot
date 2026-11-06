@@ -1,0 +1,10 @@
+{
+  "name": "toydep-vcpkg-service",
+  "version-string": "0.1.0",
+  "dependencies": [
+    {
+      "name": "toydep",
+      "version>=": "1.0.0"
+    }
+  ]
+}

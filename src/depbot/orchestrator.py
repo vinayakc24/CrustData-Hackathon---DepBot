@@ -440,7 +440,7 @@ class RepositoryJobRunner:
             json.dumps([p.model_dump(mode="json") for p in plan], indent=2),
         )
         self.state.transition(JobStatus.PLANNED, f"{len(plan)} planned edit(s)")
-        decision = plan_confidence_gate(self.job.policy, self.state.breaking_changes, plan)
+        decision = plan_confidence_gate(self.job.policy, self.state.breaking_changes, plan, self.state.usages)
         decision_data = decision.model_dump(mode="json")
         self.policy_decisions.append(decision_data)
         self.state.policy_decisions.append(decision_data)

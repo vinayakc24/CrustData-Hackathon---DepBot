@@ -1,6 +1,8 @@
 # Same toydep 1.0.0 -> 2.0.0 release, but the notes are prose that DepBot's changelog
-# rules cannot parse ("is gone", "switch to"). Without an LLM the job stops for human
-# review; with --llm gemini|anthropic, R3 extracts old_sum -> sum from the quoted text.
+# rules cannot parse ("is gone", "switch to"). Without an LLM, the header diff still proves
+# old_sum was removed but no replacement is documented, so nothing is patched and the upgraded
+# build fails honestly (FAILED_BUILD). With --llm gemini|anthropic, R3 extracts old_sum -> sum
+# from the quoted text and the repos are VERIFIED.
 event_id: toydep-v2-prose
 dependency_name: toydep
 upstream_repo: local/toydep
