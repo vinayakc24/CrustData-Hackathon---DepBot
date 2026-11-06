@@ -1,6 +1,6 @@
 """Production LLM provider: Anthropic Messages API over stdlib HTTP (owner: Member A).
 
-* The API key is read from ``LLM_API_KEY`` (plan.md §7) or ``ANTHROPIC_API_KEY``;
+* The API key is read from ``LLM_API_KEY`` (docs/plan.md §7) or ``ANTHROPIC_API_KEY``;
   it is sent only in the request header and never logged, echoed or stored.
 * The model must return one JSON document matching the requested Pydantic
   schema. Anything else raises ``LLMError``; callers never get unvalidated text.

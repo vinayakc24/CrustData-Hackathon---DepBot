@@ -2,7 +2,7 @@
 
 Owner: Member A. Each Protocol is the exact callable signature the orchestrator
 invokes. Stage owners implement a plain function with this signature in their
-module (paths listed in CONTRACTS.md). Stages raise ``StageError`` for expected,
+module (paths listed in docs/CONTRACTS.md). Stages raise ``StageError`` for expected,
 explained failures; any other exception is treated as a bug and fails the job.
 """
 

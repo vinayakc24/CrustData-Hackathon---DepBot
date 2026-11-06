@@ -2,9 +2,12 @@
 
 Before making changes, read:
 
-1. `instructions.md` — mandatory coding, safety, collaboration, and efficiency rules.
-2. `plan.md` — product scope, architecture, interfaces, implementation stages, tests, and three-person schedule.
+1. `docs/instructions.md` — mandatory coding, safety, collaboration, and efficiency rules.
+2. `docs/plan.md` — product scope, architecture, implementation stages, tests, and team schedule.
+3. `docs/CONTRACTS.md` — shared models, stage signatures and the contract change log.
 
-Follow the file ownership assigned by the human team. Do not modify shared contracts (`models.py`, `state.py`, `orchestrator.py`, `cli.py`) unless you are the integration owner or have explicit approval.
+`README.md` describes the shipped system, the demos, every test suite, the trials run and the known limits.
 
-Prioritize the P0 end-to-end workflow. Add tests with each module. Never claim a build, test, or verification passed unless it was actually run. See `instructions.md` for the full rules.
+Do not modify shared contracts (`models.py`, `state.py`, `orchestrator.py`, `cli.py`) unless you are the
+integration owner or have explicit approval. Add tests with each module. Never claim a build, test, or
+verification passed unless it was actually run.

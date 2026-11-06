@@ -1,7 +1,7 @@
 """Authoritative shared data contracts for DepBot.
 
 Owner: Member A (integration owner). Members B and C consume these models;
-changes are proposed to A, never made independently. See CONTRACTS.md.
+changes are proposed to A, never made independently. See docs/CONTRACTS.md.
 
 Data flow (each arrow is a typed hand-off):
 
@@ -55,7 +55,7 @@ class ChangeType(StrEnum):
 
 
 class ChangeSource(StrEnum):
-    """Which research layer produced a BreakingChange (see CONTRACTS.md §10)."""
+    """Which research layer produced a BreakingChange (see docs/CONTRACTS.md §10)."""
 
     API_DIFF = "api_diff"  # R1: old vs new public headers (libclang)
     CHANGELOG_RULE = "changelog_rule"  # R2: deterministic release-note patterns
@@ -73,7 +73,7 @@ class AnalysisMethod(StrEnum):
 
 
 class ResolutionLayer(StrEnum):
-    """Which impact-cascade layer settled a usage's verdict (see CONTRACTS.md §9)."""
+    """Which impact-cascade layer settled a usage's verdict (see docs/CONTRACTS.md §9)."""
 
     TEXT_PREFILTER = "text_prefilter"  # I1: text match only, nothing proved yet
     CLANG_AST = "clang_ast"  # I2: USR resolution
@@ -138,11 +138,6 @@ class OutcomeStatus(StrEnum):
     FAILED = "failed"  # job ran and a stage failed
 
 
-class MigrationVerification(StrEnum):
-    VERIFIED = "verified"
-    PARTIAL = "partial"
-    FAILED = "failed"
-
 
 # ------------------------------------------------------------------ fleet inputs
 
@@ -163,7 +158,6 @@ class RepositoryRecord(_Model):
     default_branch: str | None = None
     owner: str | None = None
     policy_id: str | None = None
-    last_scanned_commit: str | None = None
     enabled: bool = True
     # Repository-relative paths DepBot may edit. Empty means "source dirs + manifest".
     allowed_paths: list[str] = Field(default_factory=list)
@@ -204,16 +198,6 @@ class RepositoryDependencyRecord(_Model):
     affected_symbols: list[str] = Field(default_factory=list)
 
 
-class MigrationPattern(_Model):
-    pattern_id: str
-    dependency_name: str
-    version_range: str
-    old_symbols: list[str]
-    replacement_summary: str
-    evidence_urls: list[str]
-    context_notes: str = ""
-    verification_status: MigrationVerification
-    source_run_id: str
 
 
 class UpgradePolicy(_Model):
@@ -223,7 +207,6 @@ class UpgradePolicy(_Model):
     )
     require_tests: bool = True
     require_baseline: bool = True
-    require_release_build: bool = False
     # CMake configurations each verification phase builds and tests; all must pass.
     # Default Release only (P0); add Debug for the P1 configuration matrix.
     build_configurations: list[Literal["Release", "Debug"]] = Field(default_factory=lambda: ["Release"])

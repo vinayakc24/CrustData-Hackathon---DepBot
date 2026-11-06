@@ -1,7 +1,7 @@
 """R1 — public API diff of a dependency between two versions (libclang; no LLM).
 
 Written by Member A at the team's request; research/** is Member B's area, and B
-wires this into ``research_release`` (see CONTRACTS.md §10).
+wires this into ``research_release`` (see docs/CONTRACTS.md §10).
 
 Pipeline:
 1. Locate the dependency's headers for each version from the compile databases the

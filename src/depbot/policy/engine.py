@@ -1,4 +1,4 @@
-"""Policy gates. Every decision is recorded with its reasons (plan.md §3.9)."""
+"""Policy gates. Every decision is recorded with its reasons (docs/plan.md §3.9)."""
 
 from __future__ import annotations
 
