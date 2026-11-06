@@ -8,6 +8,12 @@ from depbot.llm.base import LLMError
 from depbot.llm.gemini import API_KEY_ENV_VAR, API_URL_TEMPLATE, GeminiLLMClient
 
 
+@pytest.fixture(autouse=True)
+def _no_retry_sleep(monkeypatch):
+    import depbot.llm.gemini as gemini
+    monkeypatch.setattr(gemini.time, "sleep", lambda _seconds: None)
+
+
 class Answer(BaseModel):
     value: int
 
@@ -158,3 +164,44 @@ def test_invalid_key_400_is_reported_as_authentication():
     with pytest.raises(LLMError, match="authentication failed .*API key not valid"):
         GeminiLLMClient(api_key="k", transport=FakeTransport(status=400, body=body)).complete_structured(
             task="t", system="", user="", schema=Answer)
+
+
+
+class SequenceTransport(FakeTransport):
+    def __init__(self, statuses):
+        super().__init__()
+        self.statuses = list(statuses)
+
+    def __call__(self, url, headers, raw_body, timeout):
+        self.requests.append(json.loads(raw_body))
+        status = self.statuses.pop(0)
+        if status != 200:
+            return status, json.dumps({"error": {"message": "This model is currently experiencing high demand."}}).encode()
+        return 200, json.dumps(self.body).encode()
+
+
+def test_temporary_overload_is_retried_then_succeeds(monkeypatch):
+    import depbot.llm.gemini as gemini
+    monkeypatch.setattr(gemini.time, "sleep", lambda s: None)
+    transport = SequenceTransport([503, 429, 200])
+    client = GeminiLLMClient(api_key="k", transport=transport)
+    assert client.complete_structured(task="t", system="", user="", schema=Answer).value == 7
+    assert len(transport.requests) == 3 and client.retries == 2
+
+
+def test_persistent_overload_fails_cleanly_after_bounded_retries(monkeypatch):
+    import depbot.llm.gemini as gemini
+    monkeypatch.setattr(gemini.time, "sleep", lambda s: None)
+    transport = SequenceTransport([503, 503, 503, 200])
+    with pytest.raises(LLMError, match="HTTP 503\\): This model is currently experiencing high demand"):
+        GeminiLLMClient(api_key="k", transport=transport).complete_structured(task="t", system="", user="", schema=Answer)
+    assert len(transport.requests) == 3  # 1 try + 2 retries, never unbounded
+
+
+def test_client_errors_are_not_retried(monkeypatch):
+    import depbot.llm.gemini as gemini
+    monkeypatch.setattr(gemini.time, "sleep", lambda s: (_ for _ in ()).throw(AssertionError("no sleep")))
+    transport = SequenceTransport([404])
+    with pytest.raises(LLMError, match="HTTP 404"):
+        GeminiLLMClient(api_key="k", transport=transport).complete_structured(task="t", system="", user="", schema=Answer)
+    assert len(transport.requests) == 1

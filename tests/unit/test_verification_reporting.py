@@ -5,11 +5,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from depbot.knowledge.pattern_store import (
-    KnowledgeStoreError,
-    find_verified_patterns,
-    store_verified_pattern,
-)
 from depbot.models import (
     CommandResult,
     AnalysisMethod,
@@ -18,8 +13,6 @@ from depbot.models import (
     CodeUsage,
     Dependency,
     ImpactLevel,
-    MigrationPattern,
-    MigrationVerification,
     PackageManagerName,
     UpgradePolicy,
     VerificationPhase,
@@ -130,37 +123,6 @@ def test_evidence_report_discloses_failed_build_and_missing_tests(tmp_path: Path
     assert "Upgraded verification passed: **False**" in report
     assert "ctest: **not run**; not recorded" in report.lower()
     assert evidence_json["remaining_risks"]
-
-
-def _pattern(status=MigrationVerification.VERIFIED):
-    return MigrationPattern(
-        pattern_id="toydep-old-sum-v2",
-        dependency_name="toydep",
-        version_range="<2.0.0 -> 2.0.0",
-        old_symbols=["old_sum"],
-        replacement_summary="Use sum.",
-        evidence_urls=["file:///release-notes.md"],
-        verification_status=status,
-        source_run_id="run-123",
-    )
-
-
-def test_knowledge_store_only_records_and_returns_verified_patterns(tmp_path: Path):
-    store = tmp_path / "patterns.jsonl"
-    with pytest.raises(KnowledgeStoreError):
-        store_verified_pattern(store, _pattern(MigrationVerification.PARTIAL))
-    store_verified_pattern(store, _pattern())
-    store_verified_pattern(store, _pattern())  # duplicate IDs are idempotent
-    matches = find_verified_patterns(store, dependency_name="toydep", old_symbol="old_sum")
-    assert [item.pattern_id for item in matches] == ["toydep-old-sum-v2"]
-    assert not find_verified_patterns(store, dependency_name="other")
-
-
-def test_knowledge_store_rejects_corrupt_json(tmp_path: Path):
-    store = tmp_path / "patterns.jsonl"
-    store.write_text("{not-json}\n", encoding="utf-8")
-    with pytest.raises(KnowledgeStoreError):
-        find_verified_patterns(store, dependency_name="toydep")
 
 
 def test_repair_proposes_only_new_evidence_backed_removed_symbol_diff(tmp_path: Path):

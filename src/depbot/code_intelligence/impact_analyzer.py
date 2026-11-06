@@ -268,7 +268,7 @@ def _safe_source_line(root: Path, match: UsageMatch) -> str:
 def find_impacted_usages(
     *, worktree: Path, changes: list[BreakingChange], artifacts_dir: Path
 ) -> list[CodeUsage]:
-    """Impact cascade (CONTRACTS.md §9): I1 text candidates → I2 libclang USR resolution
+    """Impact cascade (docs/CONTRACTS.md §9): I1 text candidates → I2 libclang USR resolution
     → I3 compiler-probe diagnostics → I4 LLM for the residue only.
 
     Without a compile database or libclang, I1's text verdicts are returned as before

@@ -1,4 +1,4 @@
-"""PR delivery (owner: Member A, per plan.md §9).
+"""PR delivery (owner: Member A, per docs/plan.md §9).
 
 Every verified job gets a local PR artifact (``pr/pr-body.md`` + ``pr/pr.json``)
 built only from recorded evidence. Publishing to GitHub is opt-in

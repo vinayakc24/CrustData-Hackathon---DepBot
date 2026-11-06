@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
@@ -19,7 +20,7 @@ T = TypeVar("T", bound=BaseModel)
 API_URL_TEMPLATE = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 API_KEY_ENV_VAR = "GEMINI_API_KEY"
 MODEL_ENV_VAR = "DEPBOT_LLM_MODEL"
-DEFAULT_MODEL = "gemini-2.5-flash"
+DEFAULT_MODEL = "gemini-flash-latest"  # alias; gemini-2.5-flash is closed to new API users
 DEFAULT_TIMEOUT_SECONDS = 120.0
 DEFAULT_MAX_RESPONSE_BYTES = 2_000_000
 _READ_CHUNK_BYTES = 64 * 1024
@@ -65,6 +66,9 @@ def _urllib_transport(
 
 
 _ERROR_BODY_LIMIT = 4096
+# Temporary overload / rate limit: bounded retries with a short backoff, then a clean LLMError.
+_RETRY_STATUSES = (429, 500, 503)
+RETRY_DELAYS_SECONDS = (2.0, 5.0)
 
 
 def _error_detail(raw: bytes, api_key: str) -> str:
@@ -142,6 +146,7 @@ class GeminiLLMClient(LLMClient):
             )
         )
         self.calls: list[str] = []
+        self.retries = 0
 
     def __repr__(self) -> str:
         return f"GeminiLLMClient(model={self.model!r})"
@@ -179,15 +184,19 @@ class GeminiLLMClient(LLMClient):
         }
         url = API_URL_TEMPLATE.format(model=self.model)
         headers = {"content-type": "application/json", "x-goog-api-key": self._api_key}
-        try:
-            status, raw = self._transport(
-                url, headers, json.dumps(payload).encode("utf-8"), self.timeout_seconds
-            )
-        except _ResponseTooLarge:
-            raise LLMError(f"[{task}] Gemini response exceeded the configured size limit") from None
-        except Exception as exc:
-            # Never include exception text: custom transports can include request headers.
-            raise LLMError(f"[{task}] Gemini request failed: {type(exc).__name__}") from None
+        body_bytes = json.dumps(payload).encode("utf-8")
+        for attempt in range(len(RETRY_DELAYS_SECONDS) + 1):
+            try:
+                status, raw = self._transport(url, headers, body_bytes, self.timeout_seconds)
+            except _ResponseTooLarge:
+                raise LLMError(f"[{task}] Gemini response exceeded the configured size limit") from None
+            except Exception as exc:
+                # Never include exception text: custom transports can include request headers.
+                raise LLMError(f"[{task}] Gemini request failed: {type(exc).__name__}") from None
+            if status not in _RETRY_STATUSES or attempt == len(RETRY_DELAYS_SECONDS):
+                break
+            self.retries += 1
+            time.sleep(RETRY_DELAYS_SECONDS[attempt])
 
         if len(raw) > self.max_response_bytes:
             raise LLMError(f"[{task}] Gemini response exceeded the configured size limit")

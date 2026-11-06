@@ -1,4 +1,4 @@
-"""vcpkg adapter: manifest mode (``vcpkg.json``) only (plan.md §3.2, instructions.md §9).
+"""vcpkg adapter: manifest mode (``vcpkg.json``) only (docs/plan.md §3.2, docs/instructions.md §9).
 
 Version model (vcpkg "versioning"):
   * resolved version = max(baseline version, every ``version>=`` constraint),

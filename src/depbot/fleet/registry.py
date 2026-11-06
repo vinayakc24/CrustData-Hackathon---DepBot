@@ -1,4 +1,4 @@
-"""Fleet registry loaded from a small YAML file (plan.md §7).
+"""Fleet registry loaded from a small YAML file (docs/plan.md §7).
 
 Example::
 

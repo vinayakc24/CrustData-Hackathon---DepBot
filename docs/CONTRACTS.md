@@ -1,4 +1,4 @@
-# DepBot Contract Handoff — v0.8.1
+# DepBot Contract Handoff — v0.8.2
 
 Owner: **Member A**. These contracts are frozen for the first end-to-end demo.
 B and C implement against them; if you need a change, propose it to A (field,
@@ -222,7 +222,7 @@ result = client.complete_structured(
   `$DEPBOT_LLM_MODEL`, default `claude-sonnet-5-5`). `--llm gemini [--llm-model M]` uses
   `depbot.llm.gemini.GeminiLLMClient` with Google's Gemini Developer API over HTTPS. Gemini reads its
   key exclusively from `GEMINI_API_KEY`, sends it in the `x-goog-api-key` header, and selects the model
-  from `--llm-model` or `$DEPBOT_LLM_MODEL` (default `gemini-2.5-flash`). The CLI fails fast if the
+  from `--llm-model` or `$DEPBOT_LLM_MODEL` (default `gemini-flash-latest`). The CLI fails fast if the
   selected provider's key is missing. Both providers request JSON structured output, validate it
   against the supplied Pydantic schema, use finite timeouts and bounded response bodies, and offer no
   tools to the model.
@@ -334,6 +334,12 @@ target, not just the target version's section.
 
 ## 7. Change log
 
+- 0.8.2 — cleanup for submission. Removed: `MigrationPattern`, `MigrationVerification` and
+  `depbot.knowledge` (a verified-pattern store the pipeline never called), and the never-read fields
+  `UpgradePolicy.require_release_build` (superseded by `build_configurations`) and
+  `RepositoryRecord.last_scanned_commit`. Gemini now defaults to
+  `gemini-flash-latest` (`gemini-2.5-flash` is closed to new API users) and retries 429/500/503 twice
+  before failing. Docs moved to `docs/`.
 - 0.8.1 — the plan-confidence gate (`plan_confidence_gate(..., usages)`) judges only the changes the
   migration relies on: those cited by a planned edit or by a definite/possible usage. Low-confidence
   changes this repository never uses are listed in the decision's reasons but don't block. Found on the

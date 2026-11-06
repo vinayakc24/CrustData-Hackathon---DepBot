@@ -10,3 +10,11 @@ artifacts/*
 !artifacts/.gitkeep
 .depbot/
 CMakeUserPresets.json
+
+# local tool environments and demo state created by runs
+.venv*/
+.uv-python/
+.uv-cache/
+.depbot*/
+examples/**/.work/
+examples/**/vcpkg_installed/

@@ -1,7 +1,7 @@
 """Per-repository job state and explicit stage transitions.
 
 Owner: Member A. Fleet-level state never lives here: one DepBotState describes
-exactly one repository job (plan.md §3.7, §5.4).
+exactly one repository job (docs/plan.md §3.7, §5.4).
 """
 
 from __future__ import annotations
