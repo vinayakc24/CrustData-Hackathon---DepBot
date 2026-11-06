@@ -1,0 +1,12 @@
+# vcpkg demo: a manifest-mode repo whose registry (filesystem, inside the repo) has toydep
+# 1.0.0 and 2.0.0. DepBot raises the `version>=` constraint; the registry baseline never moves.
+fleet_id: real-vcpkg-demo
+default_policy_id: demo
+policies:
+  demo:
+    allowed_change_levels: [patch, minor, major]
+    require_human_approval_for_major: true
+repositories:
+  - repository_id: toydep_vcpkg_service
+    display_name: toydep service on vcpkg (manifest mode)
+    repo_url_or_path: app

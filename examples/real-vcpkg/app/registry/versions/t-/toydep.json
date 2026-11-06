@@ -1,0 +1,14 @@
+{
+  "versions": [
+    {
+      "version": "2.0.0",
+      "port-version": 0,
+      "path": "$/ports/toydep/2.0.0"
+    },
+    {
+      "version": "1.0.0",
+      "port-version": 0,
+      "path": "$/ports/toydep/1.0.0"
+    }
+  ]
+}

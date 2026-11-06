@@ -1,0 +1,8 @@
+event_id: toydep-v2-vcpkg
+dependency_name: toydep
+upstream_repo: local/toydep
+previous_version: 1.0.0
+target_version: 2.0.0
+event_type: release
+changelog_path: ../../../tests/fixtures/toydep/release-notes-2.0.0.md
+detected_at: "2026-11-06T00:00:00+00:00"
