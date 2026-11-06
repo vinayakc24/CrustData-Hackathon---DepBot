@@ -25,7 +25,7 @@ class FakeTransport:
         if self.exception:
             raise self.exception
         self.requests.append((url, headers, json.loads(raw_body), timeout))
-        return self.status, json.dumps(self.body).encode()
+        return self.status, (self.body if isinstance(self.body, bytes) else json.dumps(self.body).encode())
 
 
 def test_gemini_sends_schema_and_validates_structured_response():
@@ -37,8 +37,8 @@ def test_gemini_sends_schema_and_validates_structured_response():
     assert headers["x-goog-api-key"] == "gemini-secret"
     assert payload["contents"] == [{"role": "user", "parts": [{"text": "USER"}]}]
     assert payload["systemInstruction"]["parts"][0]["text"] == "SYS"
-    assert payload["generationConfig"]["responseFormat"]["text"]["mimeType"] == "application/json"
-    assert payload["generationConfig"]["responseFormat"]["text"]["schema"] == Answer.model_json_schema()
+    assert payload["generationConfig"]["responseMimeType"] == "application/json"
+    assert payload["generationConfig"]["responseJsonSchema"] == Answer.model_json_schema()
     assert timeout > 0
     assert "gemini-secret" not in repr(client)
 
@@ -129,3 +129,32 @@ def test_cli_accepts_gemini_and_requires_key(monkeypatch):
     factory = _llm_factory(args)
     assert isinstance(factory(), GeminiLLMClient)
     assert factory().model == "cli-model"
+
+
+
+class Nested(BaseModel):
+    items: list[Answer]
+
+
+def test_nested_schema_refs_are_inlined_for_gemini():
+    transport = FakeTransport(body={"candidates": [{"content": {"parts": [{"text": '{"items": [{"value": 1}]}'}]}}]})
+    GeminiLLMClient(api_key="k", transport=transport).complete_structured(task="t", system="", user="", schema=Nested)
+    schema = transport.requests[0][2]["generationConfig"]["responseJsonSchema"]
+    assert "$defs" not in json.dumps(schema) and "$ref" not in json.dumps(schema)
+    assert schema["properties"]["items"]["items"]["properties"]["value"]["type"] == "integer"
+
+
+def test_400_surfaces_googles_message_with_key_redacted():
+    body = json.dumps({"error": {"code": 400, "status": "INVALID_ARGUMENT",
+                                 "message": "Invalid JSON payload received. Unknown name \"foo\" (key top-secret-key)"}}).encode()
+    client = GeminiLLMClient(api_key="top-secret-key", transport=FakeTransport(status=400, body=body))
+    with pytest.raises(LLMError, match=r"HTTP 400\): Invalid JSON payload received\. Unknown name") as error:
+        client.complete_structured(task="t", system="", user="", schema=Answer)
+    assert "top-secret-key" not in str(error.value) and "[redacted]" in str(error.value)
+
+
+def test_invalid_key_400_is_reported_as_authentication():
+    body = json.dumps({"error": {"code": 400, "message": "API key not valid. Please pass a valid API key."}}).encode()
+    with pytest.raises(LLMError, match="authentication failed .*API key not valid"):
+        GeminiLLMClient(api_key="k", transport=FakeTransport(status=400, body=body)).complete_structured(
+            task="t", system="", user="", schema=Answer)
