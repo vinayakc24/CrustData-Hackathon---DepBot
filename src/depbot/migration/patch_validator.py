@@ -73,7 +73,8 @@ def validate_and_apply(*, worktree: Path, patch: SourcePatch, allowed_paths: lis
             return _reject(patch, f"git apply failed: {detail}")
         applied = True
         whitespace = subprocess.run(
-            ["git", "diff", "--check"],
+            # CRLF files are legitimate: a trailing CR is a line ending, not whitespace.
+            ["git", "-c", "core.whitespace=cr-at-eol", "diff", "--check"],
             cwd=worktree,
             capture_output=True,
             text=True,

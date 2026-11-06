@@ -1,0 +1,13 @@
+{
+  "s01_multi_requires": "VERIFIED; only the toydep line changes, comments and otherdep untouched",
+  "s02_lockfile": "VERIFIED with conan.lock updated to toydep/2.0.0 (P0: retain relevant lockfile changes)",
+  "s03_version_range": "safe refusal: version range cannot be updated safely",
+  "s04_conanfile_py": "safe refusal: conanfile.py is executable",
+  "s05_header_and_tests": "VERIFIED; usages in include/ and tests/ patched",
+  "s06_no_tests": "not VERIFIED: policy requires tests",
+  "s07_baseline_broken": "BLOCKED/failed at baseline; upgrade not blamed, no edits",
+  "s08_crlf": "VERIFIED; CRLF line endings preserved",
+  "s09_no_code_usage": "VERIFIED with only the manifest bumped",
+  "s10_comments_and_strings": "VERIFIED with only the manifest bumped; comment and string untouched",
+  "s11_using_declaration": "VERIFIED; the using-declaration patched (or honest failure + repair)"
+}

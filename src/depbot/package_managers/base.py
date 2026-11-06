@@ -93,6 +93,10 @@ class PackageManagerAdapter(ABC):
         (e.g. the vcpkg toolchain file). Empty when the preset carries everything."""
         return []
 
+    def lockfiles(self, repo_root: Path) -> list[str]:
+        """Repo-relative lockfiles the adapter itself maintains (part of the dependency change)."""
+        return []
+
     def environment_problems(self) -> list[str]:
         """Tooling problems that make install/build impossible (checked before any edit)."""
         return []

@@ -180,7 +180,7 @@ class VcpkgAdapter(PackageManagerAdapter):
         path = repo_root / self.manifest_name
         if not path.is_file():
             raise UnsupportedManifest(f"{self.manifest_name} not found in {repo_root}")
-        text = path.read_text(encoding="utf-8")
+        text = path.read_bytes().decode("utf-8")  # bytes: keep CRLF exactly
         try:
             data = json.loads(text)
         except json.JSONDecodeError as exc:
@@ -290,7 +290,7 @@ class VcpkgAdapter(PackageManagerAdapter):
         after = replace_values(before, edits)
         if json.loads(after) != expected:  # defensive: the text edit must mean exactly this
             raise UnsupportedManifest("internal check failed: edited vcpkg.json differs from intent")
-        path.write_text(after, encoding="utf-8")
+        path.write_bytes(after.encode("utf-8"))
         return ManifestChange(
             manifest_path=self.manifest_name,
             dependency_name=name,

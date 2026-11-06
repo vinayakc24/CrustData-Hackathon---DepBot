@@ -311,6 +311,14 @@ class RepositoryJobRunner:
             self._record_commands(baseline)
             self.state.baseline = baseline
             if not baseline.passed:
+                built = all(r is not None and r.succeeded for r in
+                            (baseline.dependency_install, baseline.configure, baseline.build))
+                if built and policy.require_tests and not baseline.tests_failed and not baseline.tests_passed:
+                    raise StageError(
+                        "baseline builds but has no tests; policy requires tests to verify an upgrade "
+                        "(add a CTest test or set require_tests: false)",
+                        blocked=True,
+                    )
                 raise StageError(
                     "baseline build/tests fail before any change; refusing to migrate "
                     "(cannot separate regressions from pre-existing failures)",
@@ -493,8 +501,8 @@ class RepositoryJobRunner:
         # Final scope check over everything that actually changed in the copy.
         allowed = self._allowed_paths()
         changed = changed_files(self.worktree)
-        manifest = self.state.dependency.manifest_path
-        unexpected = [p for p in changed if p != manifest and not is_allowed(p, allowed)]
+        managed = {self.state.dependency.manifest_path, *self.adapter.lockfiles(self.worktree)}
+        unexpected = [p for p in changed if p not in managed and not is_allowed(p, allowed)]
         if unexpected:
             raise StageError(f"unexpected file changes outside plan: {unexpected}", blocked=True)
         self.state.changed_files = changed
@@ -526,7 +534,8 @@ class RepositoryJobRunner:
             self.state.transition(JobStatus.VERIFIED, "upgraded install/configure/build/tests passed")
         else:
             self.state.transition(
-                JobStatus.NO_CHANGES_NEEDED, "no impacted usages; upgraded build/tests passed"
+                JobStatus.NO_CHANGES_NEEDED,
+                "no source changes needed (no impacted usages); dependency bumped, upgraded build/tests passed"
             )
 
     def _try_repair(self) -> bool:
