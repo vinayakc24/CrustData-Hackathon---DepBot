@@ -13,8 +13,9 @@ from tests.unit.test_orchestrator import CHANGE, _stages, job  # noqa: F401  (fi
 
 
 class FakeRunner:
-    def __init__(self, remote="https://github.com/acme/repo_a.git", push_rc=0, gh_rc=0):
+    def __init__(self, remote="https://github.com/acme/repo_a.git", push_rc=0, gh_rc=0, existing=""):
         self.calls, self.remote, self.push_rc, self.gh_rc = [], remote, push_rc, gh_rc
+        self.existing = existing  # URL of a PR already open for the head branch
 
     def __call__(self, args, **kw):
         assert kw["shell"] is False and kw["timeout"]
@@ -24,6 +25,8 @@ class FakeRunner:
             return subprocess.CompletedProcess(args, 0 if ok else 2, self.remote or "", "" if ok else "no origin")
         if args[:2] == ["git", "push"]:
             return subprocess.CompletedProcess(args, self.push_rc, "", "denied" if self.push_rc else "")
+        if args[:4] == ["gh", "api", "--method", "GET"]:
+            return subprocess.CompletedProcess(args, 0, self.existing + "\n" if self.existing else "", "")
         if args[:4] == ["gh", "api", "--method", "POST"]:
             out = "https://github.com/acme/repo_a/pull/7\n" if self.gh_rc == 0 else ""
             return subprocess.CompletedProcess(args, self.gh_rc, out, "" if self.gh_rc == 0 else "gh: no auth")
@@ -63,7 +66,9 @@ def test_publish_pushes_branch_and_opens_pr_without_merge(job, tmp_path):
     fake = FakeRunner()
     result = publish_pull_request(draft, state, run=fake)
     assert result.published and result.url == "https://github.com/acme/repo_a/pull/7"
-    push, create = fake.calls[1], fake.calls[2]
+    push, lookup, create = fake.calls[1], fake.calls[2], fake.calls[3]
+    assert lookup[:5] == ["gh", "api", "--method", "GET", "repos/acme/repo_a/pulls"]
+    assert "head=acme:depbot/toydep-2.0.0" in lookup
     assert push == ["git", "push", "https://github.com/acme/repo_a.git", "HEAD:refs/heads/depbot/toydep-2.0.0"]
     assert create[:5] == ["gh", "api", "--method", "POST", "repos/acme/repo_a/pulls"]
     assert "head=depbot/toydep-2.0.0" in create and "base=main" in create
@@ -117,3 +122,52 @@ def test_pr_body_hides_local_paths_but_keeps_urls(job, tmp_path, monkeypatch):
     assert "<conan-home>/p/b/toyd123/p/include/toydep/toydep.hpp" in body
     assert "https://github.com/fmtlib/fmt/releases/tag/7.0.0" in body and "file://CHANGELOG.md" in body
     assert "`ctest --test-dir ./build" in body or "ctest" not in body
+
+
+class _Ledger:
+    def __init__(self):
+        self.done, self.begun = {}, []
+
+    def completed(self, key):
+        return self.done.get(key)
+
+    def begin(self, key, kind):
+        self.begun.append((key, kind))
+
+    def complete(self, key, result):
+        self.done[key] = result
+
+
+def _posts(fake):
+    return [c for c in fake.calls if c[:4] == ["gh", "api", "--method", "POST"]]
+
+
+def test_publishing_twice_opens_exactly_one_pr(job, tmp_path):
+    state, _ = run_repository_job(job, _stages(), artifacts_root=tmp_path / "a")
+    draft = prepare_pull_request(state, job.policy, tmp_path / "a" / state.run_id, base_branch="main")
+    ledger, fake = _Ledger(), FakeRunner()
+    first = publish_pull_request(draft, state, run=fake, ledger=ledger)
+    again = publish_pull_request(draft, state, run=fake, ledger=ledger)
+    assert first.published and again.published and again.url == first.url
+    assert len(_posts(fake)) == 1
+    key = "github_pr:acme/repo_a:depbot/toydep-2.0.0"
+    assert ledger.begun == [(key, "github_pr")] and ledger.done[key]["url"] == first.url
+    assert "earlier attempt" in again.publish_note
+
+
+def test_pr_created_by_a_crashed_attempt_is_adopted_not_duplicated(job, tmp_path):
+    """The earlier attempt created the PR but died before recording it."""
+    state, _ = run_repository_job(job, _stages(), artifacts_root=tmp_path / "a")
+    draft = prepare_pull_request(state, job.policy, tmp_path / "a" / state.run_id, base_branch="main")
+    ledger, fake = _Ledger(), FakeRunner(existing="https://github.com/acme/repo_a/pull/7")
+    result = publish_pull_request(draft, state, run=fake, ledger=ledger)
+    assert result.published and result.url.endswith("/pull/7") and not _posts(fake)
+    assert ledger.done["github_pr:acme/repo_a:depbot/toydep-2.0.0"]["url"].endswith("/pull/7")
+
+
+def test_failed_pr_creation_is_not_recorded_as_done(job, tmp_path):
+    state, _ = run_repository_job(job, _stages(), artifacts_root=tmp_path / "a")
+    draft = prepare_pull_request(state, job.policy, tmp_path / "a" / state.run_id, base_branch="main")
+    ledger = _Ledger()
+    result = publish_pull_request(draft, state, run=FakeRunner(gh_rc=1), ledger=ledger)
+    assert not result.published and ledger.begun and not ledger.done

@@ -78,6 +78,7 @@ class AnthropicLLMClient(LLMClient):
         self.timeout_seconds = timeout_seconds
         self._transport = transport or _urllib_transport
         self.calls: list[str] = []
+        self.usage: dict[str, int] = {}  # token totals as reported by the provider (telemetry)
 
     def __repr__(self) -> str:  # never expose the key
         return f"AnthropicLLMClient(model={self.model!r})"
@@ -111,6 +112,11 @@ class AnthropicLLMClient(LLMClient):
         if status != 200:
             message = body.get("error", {}).get("message", "") if isinstance(body, dict) else ""
             raise LLMError(f"[{task}] provider HTTP {status}: {message[:200]}")
+        reported = body.get("usage") if isinstance(body, dict) else None
+        if isinstance(reported, dict):
+            for key in ("input_tokens", "output_tokens"):
+                if isinstance(reported.get(key), int):
+                    self.usage[key] = self.usage.get(key, 0) + reported[key]
         if body.get("stop_reason") == "max_tokens":
             raise LLMError(f"[{task}] response truncated at max_tokens={self.max_tokens}")
         text = "".join(

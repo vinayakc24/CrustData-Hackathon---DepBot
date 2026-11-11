@@ -27,6 +27,7 @@ from typing import Protocol
 from pydantic import BaseModel, ConfigDict, Field
 
 from depbot.fleet.dependency_index import DependencyIndex
+from depbot.execution import ExecutionConfig
 from depbot.fleet.events import EventLog
 from depbot.fleet.registry import Fleet, RegistryError
 from depbot.fleet.runner import DuplicateEvent, run_fleet
@@ -125,6 +126,8 @@ def poll_fleet_once(
     create_pr: bool = False,
     llm_factory: LLMFactory | None = None,
     dry_run: bool = False,
+    workers: int = 1,
+    execution: ExecutionConfig | None = None,
 ) -> PollReport:
     report = PollReport()
     watches, report.notes = build_watches(fleet, state_dir=state_dir)
@@ -149,7 +152,8 @@ def poll_fleet_once(
             continue
         try:
             summary = run_fleet(event, fleet, stages=stages_factory(), state_dir=state_dir,
-                                artifacts_root=artifacts_root, create_pr=create_pr, llm_factory=llm_factory)
+                                artifacts_root=artifacts_root, create_pr=create_pr, llm_factory=llm_factory,
+                                workers=workers, execution=execution)
         except DuplicateEvent as exc:  # raced with another run
             report.events.append(EventOutcome(event=event, action="duplicate", detail=str(exc)))
             continue

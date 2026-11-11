@@ -171,3 +171,7 @@ def commit_all(worktree: Path, message: str) -> str:
     _git(worktree, "add", "-A")
     _git(worktree, "commit", "-q", "--allow-empty", "-m", message)
     return _git(worktree, "rev-parse", "HEAD")
+
+
+def has_uncommitted_changes(worktree: Path) -> bool:
+    return bool(_git(worktree, "status", "--porcelain").strip())

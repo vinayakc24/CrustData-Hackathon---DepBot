@@ -18,6 +18,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from depbot.interfaces import SideEffectLedger
 from depbot.models import UpgradePolicy
 from depbot.policy.engine import PolicyDecision, pre_pr_gate
 from depbot.state import DepBotState, JobStatus
@@ -180,10 +181,23 @@ def _call(run: Runner, args: list[str], cwd: Path) -> subprocess.CompletedProces
                check=False, shell=False)
 
 
+def pull_request_effect_key(slug: str, head_branch: str) -> str:
+    """Idempotency key of "the PR for this branch of this repository"."""
+    return f"github_pr:{slug}:{head_branch}"
+
+
 def publish_pull_request(
-    draft: PullRequestDraft, state: DepBotState, *, run: Runner = subprocess.run
+    draft: PullRequestDraft,
+    state: DepBotState,
+    *,
+    run: Runner = subprocess.run,
+    ledger: SideEffectLedger | None = None,
 ) -> PullRequestDraft:
-    """Push the working branch to the source repo's GitHub origin and open a PR."""
+    """Push the working branch to the source repo's GitHub origin and open a PR.
+
+    Idempotent: a PR recorded in ``ledger`` or already open on GitHub for this head
+    branch is reused, so a retried, resumed or re-run job never opens a second one.
+    """
     source, worktree = Path(state.original_repo), Path(state.worktree_path)
 
     def done(note: str, **update) -> PullRequestDraft:
@@ -197,15 +211,39 @@ def publish_pull_request(
         return done("source repository has no GitHub 'origin' remote; local PR artifact only")
     if not draft.base_branch:
         return done("no base branch known for this repository; local PR artifact only")
+    slug = match["slug"]
+    key = pull_request_effect_key(slug, draft.head_branch)
+    recorded = ledger.completed(key) if ledger is not None else None
+    if recorded and str(recorded.get("url", "")).startswith("https://"):
+        return done("already published by an earlier attempt (auto-merge disabled)",
+                    published=True, url=recorded["url"])
+    if ledger is not None:
+        ledger.begin(key, "github_pr")  # intent first: a crash after this point is visible on recovery
+
+    def published(note: str, url: str) -> PullRequestDraft:
+        if ledger is not None:
+            ledger.complete(key, {"url": url, "head": draft.head_branch, "base": draft.base_branch})
+        return done(note, published=True, url=url)
+
     push = _call(run, ["git", "push", remote.stdout.strip(), f"HEAD:refs/heads/{draft.head_branch}"], worktree)
     if push.returncode != 0:
         return done(f"git push failed: {push.stderr.strip()[:300]}")
     Path(draft.body_path).write_text(build_pr_body(state, draft.gate, published=True), encoding="utf-8")
+    # An attempt that crashed after creating the PR left no ledger entry: ask GitHub.
+    existing = _call(
+        run,
+        ["gh", "api", "--method", "GET", f"repos/{slug}/pulls", "-f", f"head={slug.split('/')[0]}:{draft.head_branch}",
+         "-f", "state=open", "--jq", ".[0].html_url // empty"],
+        worktree,
+    )
+    found = existing.stdout.strip().splitlines()[-1] if existing.returncode == 0 and existing.stdout.strip() else ""
+    if found.startswith("https://"):
+        return published("existing open PR for this branch reused (auto-merge disabled)", found)
     # REST (`POST /repos/{owner}/{repo}/pulls`) via `gh api`: works wherever `gh` is authenticated,
     # including environments where GitHub's GraphQL API (used by `gh pr create`) is unavailable.
     create = _call(
         run,
-        ["gh", "api", "--method", "POST", f"repos/{match['slug']}/pulls",
+        ["gh", "api", "--method", "POST", f"repos/{slug}/pulls",
          "-f", f"title={draft.title}", "-f", f"head={draft.head_branch}", "-f", f"base={draft.base_branch}",
          "-F", f"body=@{draft.body_path}", "--jq", ".html_url"],
         worktree,
@@ -215,7 +253,7 @@ def publish_pull_request(
     url = create.stdout.strip().splitlines()[-1] if create.stdout.strip() else None
     if not url or not url.startswith("https://"):
         return done(f"PR creation returned no URL: {create.stdout.strip()[:200]}")
-    return done("published (auto-merge disabled)", published=True, url=url)
+    return published("published (auto-merge disabled)", url)
 
 
 def load_draft(pr_dir: Path) -> PullRequestDraft:

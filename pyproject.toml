@@ -30,4 +30,5 @@ markers = [
     "integration: exercises several modules together",
     "e2e: runs real conan/cmake/ctest commands",
     "real_tooling: do not stub the package-manager tooling preflight in unit tests",
+    "container: adversarial isolation tests that need a real docker/podman runtime",
 ]
