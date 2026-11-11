@@ -1,36 +1,23 @@
-"""Generate small, deterministic diffs for explicitly evidenced API renames."""
+"""Generate small, deterministic diffs by running registered migration recipes."""
 
 from __future__ import annotations
 
 import difflib
 import hashlib
-import re
 from collections import defaultdict
 from pathlib import Path
 
 from depbot.interfaces import StageError
+from depbot.migration.recipes import DELETED, select_recipe
+from depbot.migration.recipes import unique_mapping as _mapping  # noqa: F401  (used by the repair engine)
 from depbot.models import (
     BreakingChange,
-    ChangeType,
     CodeUsage,
-    ImpactLevel,
     PatchStatus,
     PlannedChange,
     SourcePatch,
 )
 from depbot.repository.paths import UnsafePath, safe_join
-
-
-def _mapping(change: BreakingChange) -> tuple[str, str] | None:
-    if (
-        len(change.affected_symbols) != 1
-        or len(change.replacement_symbols) != 1
-        or change.change_type == ChangeType.UNKNOWN
-        or not change.evidence_urls
-    ):
-        return None
-    old, new = change.affected_symbols[0].strip(), change.replacement_symbols[0].strip()
-    return (old, new) if old and new and old != new else None
 
 
 def _diff(path: str, before: list[str], after: list[str]) -> str:
@@ -78,50 +65,38 @@ def generate_patches(
         touched_change_ids: set[str] = set()
         for change_id in item.related_change_ids:
             change = by_id.get(change_id)
-            mapping = _mapping(change) if change else None
-            if mapping is None:
-                continue
-            old, new = mapping
-            identifier = re.compile(rf"(?<![A-Za-z0-9_]){re.escape(old)}(?![A-Za-z0-9_])")
-            for usage in usage_by_key.get((item.file_path, change_id), []):
-                if usage.impact != ImpactLevel.DEFINITE or usage.symbol != old:
-                    continue
-                if item.related_usage_lines and usage.line_start not in item.related_usage_lines:
-                    continue
-                if usage.line_start != usage.line_end:
-                    continue  # multi-line evidence needs review; do not widen the edit.
-                index = usage.line_start - 1
-                if index < 0 or index >= len(after):
-                    raise StageError(
-                        f"stale usage line {item.file_path}:{usage.line_start}", blocked=True
-                    )
-                current = after[index]
-                matches = list(identifier.finditer(current))
-                if not matches:
-                    # An already migrated line is not a reason to generate another patch.
-                    if re.search(rf"(?<![A-Za-z0-9_]){re.escape(new)}(?![A-Za-z0-9_])", current):
-                        continue
-                    raise StageError(
-                        f"recorded symbol {old!r} is absent from {item.file_path}:{usage.line_start}",
-                        blocked=True,
-                    )
-                if len(matches) != 1:
-                    raise StageError(
-                        f"ambiguous occurrence count for {old!r} at {item.file_path}:{usage.line_start}",
-                        blocked=True,
-                    )
-                if usage.snippet.strip() and usage.snippet.strip() not in current:
-                    raise StageError(
-                        f"recorded source snippet changed at {item.file_path}:{usage.line_start}",
-                        blocked=True,
-                    )
-                after[index] = identifier.sub(new, current, count=1)
-                touched.add(index)
+            recipe = select_recipe(change) if change else None
+            if change is None or recipe is None:
+                continue  # no registered recipe covers this change: nothing is generated
+            cited = [
+                usage for usage in usage_by_key.get((item.file_path, change_id), [])
+                if recipe.matches(change, usage)
+                and (not item.related_usage_lines or usage.line_start in item.related_usage_lines)
+            ]
+            current = list(after)
+            result = recipe.transform(lines=current, change=change, usages=cited, file_path=item.file_path)
+            if len(result.lines) != len(current):
+                raise StageError(f"recipe {recipe.metadata.recipe_id} changed the line count", blocked=True)
+            drift = [i for i in range(len(current)) if result.lines[i] != current[i] and i not in result.touched]
+            violations = recipe.postconditions(
+                before=current, after=result.lines, touched=result.touched, change=change
+            )
+            if drift:
+                violations.append(f"lines {[i + 1 for i in drift]} changed without being reported")
+            if violations:
+                raise StageError(
+                    f"recipe {recipe.metadata.recipe_id} postcondition failed for {item.file_path}: "
+                    + "; ".join(violations),
+                    blocked=True,
+                )
+            after = result.lines
+            if result.touched:
+                touched |= result.touched
                 touched_change_ids.add(change_id)
 
         if not touched:
             continue
-        patch_text = _diff(item.file_path, before, after)
+        patch_text = _diff(item.file_path, before, [line for line in after if line != DELETED])
         patch_id = "migration-" + hashlib.sha256(patch_text.encode("utf-8")).hexdigest()[:12]
         patches.append(
             SourcePatch(

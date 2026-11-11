@@ -45,6 +45,7 @@ from depbot.package_managers.detector import detect_adapter
 from depbot.fleet.versions import UnparseableVersion, compare
 from depbot.llm.base import LLMError
 from depbot.llm.runtime import LLMFactory, current_llm_client, use_llm_client
+from depbot.migration.recipes import verification_requirement_problems
 from depbot.policy.engine import plan_confidence_gate
 from depbot.reporting.pull_request import prepare_pull_request, publish_pull_request
 from depbot.repository.compile_db import (
@@ -621,6 +622,9 @@ class RepositoryJobRunner:
         self.state.policy_decisions.append(decision_data)
         if not decision.allowed:
             raise StageError("policy: " + "; ".join(decision.reasons), blocked=True)
+        unmet = verification_requirement_problems(self.job.policy, self.state.breaking_changes, plan)
+        if unmet:
+            raise StageError("policy: " + "; ".join(unmet), blocked=True)
 
     def _allowed_paths(self) -> list[str]:
         # Explicit registry scope, else exactly the files the plan names.
