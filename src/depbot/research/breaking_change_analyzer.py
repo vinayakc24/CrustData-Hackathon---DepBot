@@ -54,6 +54,16 @@ _ITEM_REPLACEMENT = re.compile(
     r"`\*?(?P<old>[A-Za-z_~][\w:~]*)`\s*(?:-|–|—|:)\s*(?:(?:was\s+)?replaced\s+(?:by|with)|use)\s+"
     r"`\*?(?P<new>[A-Za-z_~][\w:~]*)`(?:\s+instead)?"
 )
+# A public header that moved: "`lib/old.hpp` was moved to `lib/new.hpp`", "renamed header
+# `<lib/old.h>` to `<lib/new.h>`". Header paths are kept verbatim (never namespace-stripped).
+_HEADER_PATH = r"[`<\"](?P<{name}>[A-Za-z0-9_.+-]+(?:/[A-Za-z0-9_.+-]+)*\.(?:h|hh|hpp|hxx|inc|ipp|tcc|tpp))[`>\"]"
+_HEADER_MOVE = re.compile(
+    r"(?i)(?:\b(?:moved|renamed|relocated)\s+(?:the\s+)?(?:header\s+)?"
+    + _HEADER_PATH.format(name="old") + r"\s+(?:in)?to\s+" + _HEADER_PATH.format(name="new")
+    + r"|" + _HEADER_PATH.format(name="old2")
+    + r"\s+(?:was|has\s+been|is\s+now)\s+(?:moved|renamed|relocated)\s+(?:in)?to\s+"
+    + _HEADER_PATH.format(name="new2") + r")"
+)
 _RISK_WORDS = re.compile(r"(?i)\b(?:breaking|removed|renamed|incompatible)\b")
 _INSTRUCTION_TEXT = re.compile(
     r"(?i)\b(?:ignore\s+(?:all\s+)?(?:prior|previous|above)|follow\s+these\s+instructions|"
@@ -177,6 +187,28 @@ def _deterministic_changes(
                     migration_advice=f"Replace {old} with {new}.",
                     evidence_urls=[source_url],
                     evidence_excerpt=item.group(0),
+                    confidence=0.95,
+                    source=ChangeSource.CHANGELOG_RULE,
+                ))
+            continue
+        moves = list(_HEADER_MOVE.finditer(excerpt))
+        if moves:
+            for move in moves:
+                old = move.group("old") or move.group("old2")
+                new = move.group("new") or move.group("new2")
+                key = (ChangeType.RENAMED, old, move.group(0))
+                if key in seen or old == new:
+                    continue
+                seen.add(key)
+                findings.append(BreakingChange(
+                    id=f"{dependency.name}-{event.target_version}-BC{len(findings) + 1}",
+                    title=f"header {old} moved to {new}",
+                    change_type=ChangeType.RENAMED,
+                    affected_symbols=[old],
+                    replacement_symbols=[new],
+                    migration_advice=f"Include {new} instead of {old}.",
+                    evidence_urls=[source_url],
+                    evidence_excerpt=excerpt,
                     confidence=0.95,
                     source=ChangeSource.CHANGELOG_RULE,
                 ))

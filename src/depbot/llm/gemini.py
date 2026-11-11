@@ -146,6 +146,7 @@ class GeminiLLMClient(LLMClient):
             )
         )
         self.calls: list[str] = []
+        self.usage: dict[str, int] = {}  # token totals as reported by the provider (telemetry)
         self.retries = 0
 
     def __repr__(self) -> str:
@@ -213,6 +214,11 @@ class GeminiLLMClient(LLMClient):
             raise LLMError(f"[{task}] Gemini returned a malformed response") from None
         if not isinstance(body, dict):
             raise LLMError(f"[{task}] Gemini returned a malformed response")
+        reported = body.get("usageMetadata")
+        if isinstance(reported, dict):
+            for ours, theirs in (("input_tokens", "promptTokenCount"), ("output_tokens", "candidatesTokenCount")):
+                if isinstance(reported.get(theirs), int):
+                    self.usage[ours] = self.usage.get(ours, 0) + reported[theirs]
         try:
             candidate = body["candidates"][0]
             finish_reason = candidate.get("finishReason")

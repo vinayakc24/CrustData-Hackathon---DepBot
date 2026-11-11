@@ -4,6 +4,8 @@
     depbot fleet plan   --fleet examples/demo-fleet.yaml --event examples/events/toydep-v2.yaml
     depbot run          --fleet examples/demo-fleet.yaml --event examples/events/toydep-v2.yaml --approve-major
     depbot upgrade      --repo PATH --dependency toydep --to 2.0.0 --approve-major
+    depbot runs list|show|compare|resume|cancel --fleet examples/demo-fleet.yaml [...]
+    depbot bench run    --registry benchmarks/registry.yaml
 """
 
 from __future__ import annotations
@@ -17,11 +19,22 @@ import sys
 import threading
 from pathlib import Path
 
+from depbot.benchmark.models import BenchmarkError, BenchmarkResults, load_registry
+from depbot.benchmark.runner import BenchmarkRunner, default_out_dir, tree_sha256, write_results
 from depbot.fleet.dependency_index import DependencyIndex, scan_repository
 from depbot.fleet.events import EventLog
 from depbot.fleet.monitor import PollReport, poll_fleet_once, run_monitor
 from depbot.fleet.registry import Fleet, RegistryError, load_event, load_fleet
-from depbot.fleet.runner import DuplicateEvent, run_fleet
+from pydantic import ValidationError
+
+from depbot.execution import (
+    ExecutionConfig,
+    ExecutionConfigError,
+    ExecutionContext,
+    ResourceLimits,
+    build_backend,
+)
+from depbot.fleet.runner import DuplicateEvent, FleetRunError, resume_fleet, run_fleet
 from depbot.fleet.selection import RepositorySelection, select_repositories, state_dir_for
 from depbot.fleet.versions import UnparseableVersion, compare
 from depbot.models import (
@@ -39,7 +52,9 @@ from depbot.llm.runtime import LLMFactory, fixture_factory
 from depbot.orchestrator import load_default_stages, run_repository_job
 from depbot.package_managers.conan import CONAN_HOME_ENV
 from depbot.package_managers.conan_setup import SetupError, prepare_local_packages
+from depbot.persistence.store import DB_NAME, Store, StoreError
 from depbot.policy.engine import pre_migration_gate
+from depbot.reporting.run_inspect import UnknownRun, compare_runs, list_runs, show_run
 from depbot.repository.remote import RemoteRepositoryError, is_remote, sync_remote
 
 _GOOD = {OutcomeStatus.VERIFIED, OutcomeStatus.UNAFFECTED, OutcomeStatus.SKIPPED}
@@ -203,6 +218,81 @@ def _add_llm_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--llm-model", help="model for --llm anthropic or gemini (default: $DEPBOT_LLM_MODEL)")
 
 
+def _add_exec_args(parser: argparse.ArgumentParser, *, workers: bool = True) -> None:
+    group = parser.add_argument_group("execution")
+    if workers:
+        group.add_argument("--workers", type=int, default=1,
+                           help="max concurrent repository jobs (default 1; capped by host CPU/memory)")
+    group.add_argument("--exec-backend", choices=("local", "docker", "podman"), default=None,
+                       help="where install/configure/build/test run (default: $DEPBOT_EXEC_BACKEND or local)")
+    group.add_argument("--exec-image", help="container image with the build toolchain (pin by digest)")
+    group.add_argument("--exec-network", choices=("none", "bridge"), default="none",
+                       help="container network (default: none)")
+    group.add_argument("--exec-network-install", action="store_true",
+                       help="allow network only for the dependency-install step")
+    group.add_argument("--exec-cpus", type=float, help="CPU limit per command (default 2)")
+    group.add_argument("--exec-memory-mb", type=int, help="memory limit per command in MiB (default 4096)")
+    group.add_argument("--exec-pids", type=int, help="process limit per command (default 512)")
+    group.add_argument("--exec-mount-ro", action="append", default=[], metavar="PATH",
+                       help="extra host path mounted read-only in the container (repeatable)")
+    group.add_argument("--exec-mount-rw", action="append", default=[], metavar="PATH",
+                       help="extra host path mounted read-write in the container (repeatable)")
+
+
+def _execution_config(args: argparse.Namespace) -> ExecutionConfig:
+    """Execution settings from --exec-* flags. Raises RegistryError-compatible ValueError when unsafe."""
+    backend = getattr(args, "exec_backend", None) or os.environ.get("DEPBOT_EXEC_BACKEND") or "local"
+    limits = {k: v for k, v in (("cpus", getattr(args, "exec_cpus", None)),
+                                ("memory_mb", getattr(args, "exec_memory_mb", None)),
+                                ("pids", getattr(args, "exec_pids", None))) if v is not None}
+    read_write = [str(Path(p).resolve()) for p in getattr(args, "exec_mount_rw", [])]
+    conan_home = os.environ.get(CONAN_HOME_ENV)
+    if backend != "local" and conan_home and Path(conan_home).is_dir():
+        read_write.append(str(Path(conan_home).resolve()))  # the fleet's isolated package cache
+    return ExecutionConfig(
+        backend=backend,
+        image=getattr(args, "exec_image", None) or os.environ.get("DEPBOT_EXEC_IMAGE"),
+        limits=ResourceLimits(**limits),
+        network=getattr(args, "exec_network", "none"),
+        network_for_install=getattr(args, "exec_network_install", False),
+        read_only_paths=[str(Path(p).resolve()) for p in getattr(args, "exec_mount_ro", [])],
+        read_write_paths=sorted(set(read_write)),
+    )
+
+
+def _cancel_on_signal() -> threading.Event:
+    """First Ctrl-C/SIGTERM cancels cooperatively (commands are killed, state is saved)."""
+    cancel = threading.Event()
+
+    def handler(*_):
+        if cancel.is_set():
+            raise KeyboardInterrupt
+        print("cancelling: stopping running jobs (press Ctrl-C again to abort hard)", file=sys.stderr)
+        cancel.set()
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            signal.signal(sig, handler)
+        except ValueError:  # not the main thread (tests, embedding)
+            pass
+    return cancel
+
+
+def _print_summary(summary) -> None:
+    print(
+        f"Event {summary.event_id}: {summary.dependency_name} "
+        f"{summary.from_version or '?'} -> {summary.to_version}"
+    )
+    for o in summary.outcomes:
+        print(f"  {o.status.value.upper():<10} {o.repository_id:<16} {o.reason or ''}")
+    print(
+        f"considered={summary.repositories_considered} affected={summary.repositories_affected} "
+        f"verified={summary.repositories_verified} skipped={summary.repositories_skipped} "
+        f"failed_or_blocked={summary.repositories_failed_or_blocked}"
+    )
+    print(f"fleet summary: {summary.summary_path}")
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     """Process one release event across the fleet. Exit 0 only if no job failed/blocked."""
     fleet, state_dir = _load(args)
@@ -218,6 +308,9 @@ def cmd_run(args: argparse.Namespace) -> int:
             force=args.force,
             create_pr=args.create_pr,
             llm_factory=llm_factory,
+            workers=args.workers,
+            execution=_execution_config(args),
+            cancel=_cancel_on_signal(),
         )
     except DuplicateEvent as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -225,18 +318,93 @@ def cmd_run(args: argparse.Namespace) -> int:
     if args.json:
         print(summary.model_dump_json(indent=2))
     else:
-        print(
-            f"Event {summary.event_id}: {summary.dependency_name} "
-            f"{summary.from_version or '?'} -> {summary.to_version}"
-        )
-        for o in summary.outcomes:
-            print(f"  {o.status.value.upper():<10} {o.repository_id:<16} {o.reason or ''}")
-        print(
-            f"considered={summary.repositories_considered} affected={summary.repositories_affected} "
-            f"verified={summary.repositories_verified} skipped={summary.repositories_skipped} "
-            f"failed_or_blocked={summary.repositories_failed_or_blocked}"
-        )
-        print(f"fleet summary: {summary.summary_path}")
+        _print_summary(summary)
+    return 0 if all(o.status in _GOOD for o in summary.outcomes) else 1
+
+
+def _store(args: argparse.Namespace) -> tuple[Store, Path]:
+    fleet, state_dir = _load(args)
+    if not (state_dir / DB_NAME).is_file():
+        raise RegistryError(f"no run history for this fleet yet ({state_dir / DB_NAME} does not exist)")
+    return Store.for_state_dir(state_dir), state_dir
+
+
+def cmd_runs_list(args: argparse.Namespace) -> int:
+    store, _ = _store(args)
+    rows = list_runs(store)
+    if args.json:
+        print(json.dumps(rows, indent=2))
+        return 0
+    for row in rows:
+        jobs = " ".join(f"{k}={v}" for k, v in sorted(row["jobs"].items())) or "-"
+        outcomes = " ".join(f"{k}={v}" for k, v in sorted(row["outcomes"].items())) or "-"
+        print(f"{row['fleet_run_id']}  {row['status']:<10} {row['created_at']}  jobs[{jobs}]  outcomes[{outcomes}]")
+    if not rows:
+        print("no fleet runs recorded")
+    return 0
+
+
+def cmd_runs_show(args: argparse.Namespace) -> int:
+    store, _ = _store(args)
+    data = show_run(store, args.run, repository_id=args.job)
+    if args.json:
+        print(json.dumps(data, indent=2))
+        return 0
+    print(f"{data['fleet_run_id']}  event={data['event_id']}  status={data['status']}"
+          f"{'  (cancel requested)' if data['cancel_requested'] else ''}")
+    for job in data["jobs"]:
+        print(f"  {job['repository_id']:<16} {job['status']:<10} stage={job['stage'] or '-':<18} "
+              f"attempt={job['attempt']} outcome={job['outcome'] or '-'}  {job['reason'] or ''}")
+        for stage in job["stages"]:
+            print(f"      [{stage['attempt']}] {stage['stage']:<12} {stage['status']:<9} "
+                  f"{stage['duration_seconds']:.2f}s  {stage['detail'] or ''}")
+        for entry in job["recovery"]:
+            print(f"      recovery: {entry['action']} ({entry['detail']})")
+        if job.get("artifacts"):
+            print(f"      artifacts: {len(job['artifacts'])} indexed under {job['artifacts_dir']}")
+    return 0
+
+
+def cmd_runs_compare(args: argparse.Namespace) -> int:
+    store, _ = _store(args)
+    data = compare_runs(store, args.left, args.right)
+    if args.json:
+        print(json.dumps(data, indent=2))
+        return 0
+    print(f"{data['left']}  vs  {data['right']}: {data['outcome_changes']} outcome change(s)")
+    for repo in data["repositories"]:
+        o = repo["outcome"]
+        marker = "CHANGED" if o["changed"] else "same"
+        diff = {True: "identical patch", False: "DIFFERENT patch", None: "patch n/a"}[repo["final_diff_identical"]]
+        d = repo["duration_seconds"]
+        print(f"  {repo['repository_id']:<16} {marker:<8} {o['left'] or '-'} -> {o['right'] or '-'}  {diff}  "
+              f"{d['left'] if d['left'] is not None else '-'}s -> {d['right'] if d['right'] is not None else '-'}s")
+        for key, change in repo["environment_changes"].items():
+            print(f"      {key}: {change['left']} -> {change['right']}")
+    return 0
+
+
+def cmd_runs_cancel(args: argparse.Namespace) -> int:
+    store, _ = _store(args)
+    run = show_run(store, args.run)
+    cancelled = store.request_cancel(run["fleet_run_id"])
+    print(f"cancel requested for {run['fleet_run_id']}: {cancelled} queued job(s) cancelled; "
+          "running jobs stop at their next check")
+    return 0
+
+
+def cmd_runs_resume(args: argparse.Namespace) -> int:
+    store, state_dir = _store(args)
+    run = show_run(store, args.run)
+    summary = resume_fleet(
+        run["fleet_run_id"], stages=load_default_stages(), state_dir=state_dir, store=store,
+        llm_factory=_llm_factory(args), workers=args.workers,
+        execution=_execution_config(args) if args.exec_backend else None, cancel=_cancel_on_signal(),
+    )
+    if args.json:
+        print(summary.model_dump_json(indent=2))
+    else:
+        _print_summary(summary)
     return 0 if all(o.status in _GOOD for o in summary.outcomes) else 1
 
 
@@ -293,9 +461,14 @@ def cmd_upgrade(args: argparse.Namespace) -> int:
         job_id=event.event_id, event=event, repository=repo, dependency_record=record,
         policy=policy, repo_root=str(root), create_pr=args.create_pr,
     )
+    backend = build_backend(_execution_config(args))
+    if backend.problems():
+        print(f"error: execution backend '{backend.name}' is unusable: " + "; ".join(backend.problems()),
+              file=sys.stderr)
+        return 2
     state, outcome = run_repository_job(
         job, load_default_stages(), artifacts_root=Path(args.artifacts).resolve(),
-        llm_factory=_llm_factory(args),
+        llm_factory=_llm_factory(args), execution=ExecutionContext(backend=backend),
     )
     if args.json:
         print(outcome.model_dump_json(indent=2))
@@ -303,6 +476,67 @@ def cmd_upgrade(args: argparse.Namespace) -> int:
         print(f"{outcome.status.value.upper()}: {outcome.reason or ''}")
         print(f"artifacts: {state.artifacts_dir}")
     return 0 if outcome.status in _GOOD else 1
+
+
+def cmd_bench_list(args: argparse.Namespace) -> int:
+    registry = load_registry(Path(args.registry))
+    if args.json:
+        print(registry.model_dump_json(indent=2))
+        return 0
+    print(f"{registry.suite} {registry.suite_version}: {len(registry.cases)} case(s)")
+    for case in registry.cases:
+        print(f"  {case.id:<36} {case.split:<9} {case.dependency} {case.baseline_version}->{case.target_version}"
+              f"  expect={case.expected.outcome.value}  [{', '.join(case.tags)}]")
+    return 0
+
+
+def cmd_bench_hash(args: argparse.Namespace) -> int:
+    for raw in args.path:
+        print(f"{tree_sha256(Path(raw).resolve())}  {raw}")
+    return 0
+
+
+def cmd_bench_run(args: argparse.Namespace) -> int:
+    """Run benchmark cases through the real engine. Exit 1 on any false-verified outcome or harness error."""
+    registry_path = Path(args.registry)
+    registry = load_registry(registry_path)
+    unknown = sorted(set(args.case) - {c.id for c in registry.cases})
+    if unknown:
+        raise BenchmarkError(f"unknown case id: {', '.join(unknown)}")
+    splits = ["dev", "held_out"] if args.split == "all" or args.case else [args.split]
+    backend = build_backend(_execution_config(args))
+    if backend.problems():
+        raise FleetRunError(f"execution backend '{backend.name}' is unusable: " + "; ".join(backend.problems()))
+    out_dir = Path(args.out).resolve() if args.out else default_out_dir(Path(args.artifacts).resolve())
+    llm_mode = args.llm or os.environ.get("DEPBOT_LLM") or "none"
+    runner = BenchmarkRunner(registry, registry_path, out_dir, stages_factory=load_default_stages,
+                             llm_factory=_llm_factory(args), llm_label=llm_mode, backend=backend)
+
+    def progress(result) -> None:
+        if not args.json:
+            verdict = result.status.upper() if result.status != "completed" else (
+                "ok" if result.outcome_match and result.patch_correct is not False else "MISS")
+            print(f"  {verdict:<8} {result.case_id:<36} expected={result.expected_outcome:<10} "
+                  f"actual={result.actual_outcome or '-':<10} {result.reason or ''}", flush=True)
+
+    results = runner.run(splits=splits, case_ids=args.case or None, on_case=progress)
+    if args.json:
+        print(results.model_dump_json(indent=2))
+    else:
+        overall = results.aggregate["overall"]
+        print(f"completed={overall.completed} not_run={overall.not_run} errors={overall.errors} "
+              f"outcome_accuracy={overall.outcome_accuracy} false_verified={overall.false_verified}")
+        print(f"results: {out_dir / 'results.json'}\nreport:  {out_dir / 'report.md'}")
+    overall = results.aggregate["overall"]
+    return 1 if overall.false_verified or overall.errors else 0
+
+
+def cmd_bench_report(args: argparse.Namespace) -> int:
+    path = Path(args.results)
+    results = BenchmarkResults.model_validate_json(path.read_text(encoding="utf-8"))
+    _, report = write_results(results, path.parent)
+    print(report.read_text(encoding="utf-8") if args.stdout else f"report: {report}")
+    return 0
 
 
 def _print_poll_report(report: PollReport, as_json: bool) -> None:
@@ -339,7 +573,8 @@ def cmd_monitor(args: argparse.Namespace) -> int:
     llm_factory = _llm_factory(args)
     kwargs = dict(state_dir=state_dir, artifacts_root=Path(args.artifacts).resolve(),
                   stages_factory=load_default_stages, create_pr=args.create_pr,
-                  llm_factory=llm_factory, dry_run=args.dry_run)
+                  llm_factory=llm_factory, dry_run=args.dry_run,
+                  workers=args.workers, execution=_execution_config(args))
     if args.once:
         report = poll_fleet_once(fleet, **kwargs)
         _print_poll_report(report, args.json)
@@ -386,7 +621,30 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--artifacts", default="artifacts", help="artifacts root (default: ./artifacts)")
     run.add_argument("--create-pr", action="store_true", help="open GitHub PRs for verified repos")
     _add_llm_args(run)
+    _add_exec_args(run)
     run.set_defaults(func=cmd_run)
+
+    runs = sub.add_parser("runs", help="inspect, compare, resume and cancel fleet runs").add_subparsers(
+        dest="runs_command", required=True
+    )
+    runs.add_parser("list", parents=[common], help="recorded fleet runs").set_defaults(func=cmd_runs_list)
+    show = runs.add_parser("show", parents=[common], help="jobs, stages and recovery history of one run")
+    show.add_argument("run", help="fleet run id (or unique prefix)")
+    show.add_argument("--job", metavar="REPOSITORY_ID", help="full telemetry/transitions/artifacts of one job")
+    show.set_defaults(func=cmd_runs_show)
+    cmp_ = runs.add_parser("compare", parents=[common], help="differences between two fleet runs")
+    cmp_.add_argument("left")
+    cmp_.add_argument("right")
+    cmp_.set_defaults(func=cmd_runs_compare)
+    cancel = runs.add_parser("cancel", parents=[common], help="stop a fleet run (also from another terminal)")
+    cancel.add_argument("run")
+    cancel.set_defaults(func=cmd_runs_cancel)
+    resume = runs.add_parser("resume", parents=[common], help="continue an interrupted fleet run")
+    resume.add_argument("run")
+    resume.add_argument("--approve-major", action="store_true", help=argparse.SUPPRESS)
+    _add_llm_args(resume)
+    _add_exec_args(resume)
+    resume.set_defaults(func=cmd_runs_resume, workers=None)
 
     up = sub.add_parser("upgrade", help="targeted single-repository upgrade")
     up.add_argument("--repo", required=True, help="local repository path or Git URL (https/ssh)")
@@ -402,6 +660,7 @@ def build_parser() -> argparse.ArgumentParser:
     up.add_argument("--create-pr", action="store_true", help="open a GitHub PR if verified")
     up.add_argument("--json", action="store_true")
     _add_llm_args(up)
+    _add_exec_args(up, workers=False)
     up.set_defaults(func=cmd_upgrade)
 
     mon = sub.add_parser("monitor", parents=[common], help="poll watched upstreams and process new releases")
@@ -412,7 +671,34 @@ def build_parser() -> argparse.ArgumentParser:
     mon.add_argument("--create-pr", action="store_true", help="open GitHub PRs for verified repos")
     mon.add_argument("--artifacts", default="artifacts", help="artifacts root (default: ./artifacts)")
     _add_llm_args(mon)
+    _add_exec_args(mon)
     mon.set_defaults(func=cmd_monitor)
+
+    bench = sub.add_parser("bench", help="reproducible migration benchmarks").add_subparsers(
+        dest="bench_command", required=True
+    )
+    blist = bench.add_parser("list", help="cases in a benchmark registry")
+    blist.add_argument("--registry", default="benchmarks/registry.yaml")
+    blist.add_argument("--json", action="store_true")
+    blist.set_defaults(func=cmd_bench_list)
+    bhash = bench.add_parser("hash", help="content hash that pins an in-tree fixture repository")
+    bhash.add_argument("path", nargs="+")
+    bhash.set_defaults(func=cmd_bench_hash)
+    brun = bench.add_parser("run", help="run cases and write results.json + report.md")
+    brun.add_argument("--registry", default="benchmarks/registry.yaml")
+    brun.add_argument("--split", choices=("dev", "held_out", "all"), default="dev",
+                      help="which split to run (default: dev; held-out cases run only when asked)")
+    brun.add_argument("--case", action="append", default=[], metavar="ID", help="run only this case (repeatable)")
+    brun.add_argument("--out", help="output directory (default: <artifacts>/bench-<timestamp>)")
+    brun.add_argument("--artifacts", default="artifacts")
+    brun.add_argument("--json", action="store_true")
+    _add_llm_args(brun)
+    _add_exec_args(brun, workers=False)
+    brun.set_defaults(func=cmd_bench_run)
+    breport = bench.add_parser("report", help="re-render report.md from a results.json")
+    breport.add_argument("results")
+    breport.add_argument("--stdout", action="store_true")
+    breport.set_defaults(func=cmd_bench_report)
 
     demo = sub.add_parser("demo", help="demo helpers").add_subparsers(dest="demo_command", required=True)
     setup = demo.add_parser("setup", help="build local recipes into the fleet's isolated Conan home")
@@ -432,7 +718,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     try:
         return args.func(args)
-    except (RegistryError, LLMError) as exc:
+    except (RegistryError, LLMError, FleetRunError, StoreError, UnknownRun, ExecutionConfigError, BenchmarkError,
+            ValidationError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 

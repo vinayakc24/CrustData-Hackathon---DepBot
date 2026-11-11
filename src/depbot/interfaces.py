@@ -25,8 +25,10 @@ from depbot.models import (
 )
 
 if TYPE_CHECKING:
+    from depbot.models import RepositoryUpgradeOutcome
     from depbot.package_managers.base import PackageManagerAdapter
-    from depbot.state import DepBotState
+    from depbot.state import DepBotState, StatusChange
+    from depbot.telemetry import JobTelemetry, StageSpan
 
 
 class StageError(RuntimeError):
@@ -158,3 +160,35 @@ class PipelineStages:
     verify: VerifyStage
     report: ReportStage
     repair: RepairStage | None = None  # None: build/test failures are terminal
+
+
+# --- Durability hooks (contract v0.9) ---------------------------------------------
+
+
+class JobObserver(Protocol):
+    """Receives one job's progress so it can be made durable and observable.
+
+    The engine calls ``checkpoint`` after every state transition (the stage-level
+    resume points), ``stage_finished`` after every stage attempt and ``finished``
+    once with the final outcome. Implementations must not mutate ``state``.
+    """
+
+    def checkpoint(self, state: DepBotState, change: StatusChange | None) -> None: ...
+
+    def stage_finished(self, span: StageSpan) -> None: ...
+
+    def finished(
+        self, state: DepBotState, outcome: RepositoryUpgradeOutcome, telemetry: JobTelemetry
+    ) -> None: ...
+
+
+class SideEffectLedger(Protocol):
+    """Durable record of external side effects (e.g. a GitHub PR) keyed by a stable
+    idempotency key, so a retried or resumed job never repeats one."""
+
+    def completed(self, key: str) -> dict | None:
+        """The recorded result if this effect already happened, else None."""
+
+    def begin(self, key: str, kind: str) -> None: ...
+
+    def complete(self, key: str, result: dict) -> None: ...

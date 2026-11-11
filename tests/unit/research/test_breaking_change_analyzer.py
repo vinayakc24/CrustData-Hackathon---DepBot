@@ -208,3 +208,26 @@ def test_use_instead_list_phrasing(tmp_path: Path) -> None:
     changes = research_release(event=event, dependency=dependency, artifacts_dir=tmp_path / "a")
     assert [(c.affected_symbols, c.replacement_symbols) for c in changes if c.replacement_symbols] == [
         (["has_formatter"], ["is_formattable"])]
+
+
+@pytest.mark.parametrize("sentence,old,new", [
+    ("The header `geomdep/legacy.hpp` was moved to `geomdep/core.hpp`.", "geomdep/legacy.hpp", "geomdep/core.hpp"),
+    ("Renamed header <fmt/core.h> to <fmt/base.h>.", "fmt/core.h", "fmt/base.h"),
+    ("`util.hpp` has been relocated into `detail/util.hpp`", "util.hpp", "detail/util.hpp"),
+])
+def test_moved_header_is_a_rename_with_verbatim_paths(tmp_path: Path, sentence: str, old: str, new: str) -> None:
+    notes = tmp_path / "notes.md"
+    notes.write_text(f"# toydep 2.0.0\n\n{sentence}\n", encoding="utf-8")
+    event, dependency = _inputs(notes)
+    (change,) = research_release(event=event, dependency=dependency, artifacts_dir=tmp_path / "a")
+    assert change.change_type.value == "renamed" and change.source.value == "changelog_rule"
+    assert change.affected_symbols == [old] and change.replacement_symbols == [new]
+    assert sentence in change.evidence_excerpt and change.evidence_urls
+
+
+def test_header_move_rule_does_not_capture_ordinary_renames(tmp_path: Path) -> None:
+    notes = tmp_path / "notes.md"
+    notes.write_text("# toydep 2.0.0\n\nRenamed `old_sum` to `sum`.\n", encoding="utf-8")
+    event, dependency = _inputs(notes)
+    (change,) = research_release(event=event, dependency=dependency, artifacts_dir=tmp_path / "a")
+    assert change.affected_symbols == ["old_sum"] and change.replacement_symbols == ["sum"]
