@@ -13,7 +13,7 @@ ReleaseEvent ─► fleet selection ─► per-repository job ─► verified br
 
 | What was run for real | Result |
 |---|---|
-| 0 automated tests (unit + integration + end-to-end with real Conan/CMake/CTest) | all pass or skip with a stated reason (libclang and container-runtime tests skip where those are not installed) |
+| 517 automated tests (unit + integration + end-to-end with real Conan/CMake/CTest) | all pass or skip with a stated reason (libclang and container-runtime tests skip where those are not installed) |
 | Fleet demo: toydep 1.0.0 → 2.0.0 across 3 repos | 2 VERIFIED, 1 SKIPPED (already current) |
 | **Real library upgrade: {fmt} 6.2.1 → 7.0.0** built from upstream tags | **VERIFIED**: the `fmt::parse_context` → `fmt::format_parse_context` rename was found in fmt's own changelog, located, patched and verified |
 | **Real vcpkg (2026-10-29 release), manifest mode** | **VERIFIED**: `version>=` raised, registry baseline untouched |
@@ -47,7 +47,7 @@ vcpkg. Optional: libclang 18 for the AST layers (`pip install -e ".[ast]"`), `gh
 
 ```bash
 pip install -e ".[dev]"            # add ",ast" for libclang-based analysis
-pytest                              # 0 tests; real-tool tests skip if conan/cmake are missing
+pytest                              # 517 tests; real-tool tests skip if conan/cmake are missing
 
 # Main demo: one release event across a three-repository fleet (offline)
 depbot demo setup --fleet examples/demo-fleet.yaml \
@@ -535,7 +535,8 @@ pytest tests/e2e                         # real-tool end-to-end only
 pytest -m "not real_tooling" tests/unit  # pure unit tests
 ```
 
-0 tests in 50 files:
+517 tests in 50 files (the table below predates the infrastructure suites: execution,
+persistence, worker pool, recipes, benchmark, durable-fleet and CLI integration tests):
 
 | Suite | Tests | What it proves |
 |---|---:|---|
