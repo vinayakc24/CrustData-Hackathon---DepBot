@@ -13,7 +13,7 @@ ReleaseEvent ─► fleet selection ─► per-repository job ─► verified br
 
 | What was run for real | Result |
 |---|---|
-| 384 automated tests (unit + integration + end-to-end with real Conan/CMake/CTest) | all pass (Linux container; also on a MacBook's Linux VM) |
+| 0 automated tests (unit + integration + end-to-end with real Conan/CMake/CTest) | all pass or skip with a stated reason (libclang and container-runtime tests skip where those are not installed) |
 | Fleet demo: toydep 1.0.0 → 2.0.0 across 3 repos | 2 VERIFIED, 1 SKIPPED (already current) |
 | **Real library upgrade: {fmt} 6.2.1 → 7.0.0** built from upstream tags | **VERIFIED**: the `fmt::parse_context` → `fmt::format_parse_context` rename was found in fmt's own changelog, located, patched and verified |
 | **Real vcpkg (2026-10-29 release), manifest mode** | **VERIFIED**: `version>=` raised, registry baseline untouched |
@@ -47,7 +47,7 @@ vcpkg. Optional: libclang 18 for the AST layers (`pip install -e ".[ast]"`), `gh
 
 ```bash
 pip install -e ".[dev]"            # add ",ast" for libclang-based analysis
-pytest                              # 384 tests; real-tool tests skip if conan/cmake are missing
+pytest                              # 0 tests; real-tool tests skip if conan/cmake are missing
 
 # Main demo: one release event across a three-repository fleet (offline)
 depbot demo setup --fleet examples/demo-fleet.yaml \
@@ -404,6 +404,8 @@ filesystem. The first real PR did.
 | Over-broad edits | patches only on planned files/lines; final scope check; manifest edited only by the adapter |
 | Upgrading unrelated packages | vcpkg baseline never moved; Conan lockfile pins kept except the target; version ranges and `conanfile.py` refused |
 | Fake success | `verified` requires real passing install/configure/build/tests; a baseline failure blocks; missing facts reported as missing |
+| Untrusted build scripts | opt-in container backend: non-root, no capabilities, read-only root, CPU/memory/PID/time limits, no network, only the job directory writable ([docs/INFRASTRUCTURE.md](docs/INFRASTRUCTURE.md)) |
+| Losing or repeating work after a crash | SQLite state with worker leases, stage checkpoints and an idempotency ledger for PRs |
 | Runaway repair | bounded attempts, never the same diff twice, no test edits |
 | Unreviewed merges | `auto_merge` rejected by the model; PRs are opened, never merged |
 
@@ -411,16 +413,21 @@ filesystem. The first real PR did.
 
 ## 5. Code map
 
-`src/depbot/` (about 8,700 lines). Ownership followed the team split: **A** core/integration,
+`src/depbot/`. Ownership followed the team split: **A** core/integration,
 **B** research and code intelligence, **C** migration, verification and reporting.
 
 | Module | Purpose |
 |---|---|
 | `models.py`, `state.py`, `interfaces.py` | typed contracts, job state machine, stage protocols and `StageError` |
 | `orchestrator.py` | the repository engine: runs one job through all stages; probe; repair loop; delivery |
-| `cli.py` | `depbot fleet status/plan`, `run`, `upgrade`, `monitor`, `demo setup` |
+| `cli.py` | `depbot fleet status/plan`, `run`, `upgrade`, `monitor`, `runs …`, `bench …`, `demo setup` |
+| `execution/backend.py`, `local.py`, `container.py` | execution backend contract and per-job context, local processes, hardened Docker/Podman containers |
+| `persistence/store.py`, `observer.py` | SQLite store (events, runs, jobs, leases, transitions, artifacts, side effects), job checkpointing and heartbeats |
+| `fleet/pool.py` | bounded worker pool and resource-capped worker count |
+| `telemetry.py`, `reporting/run_inspect.py` | per-job telemetry document, run inspection and comparison |
+| `benchmark/models.py`, `runner.py`, `evaluator.py`, `report.py` | benchmark registry schema, runner, metrics, Markdown report |
 | `fleet/registry.py` | fleet YAML (repositories, policies, watches) |
-| `fleet/dependency_index.py`, `events.py`, `selection.py`, `runner.py`, `report.py`, `versions.py`, `monitor.py` | inventory cache, event dedup, selection, fleet run, fleet summary, version comparison, monitor wiring |
+| `fleet/dependency_index.py`, `events.py`, `selection.py`, `runner.py`, `report.py`, `versions.py`, `monitor.py` | inventory cache, event dedup, selection, durable fleet run and resume, fleet summary, version comparison, monitor wiring |
 | `monitor/release_monitor.py` | polling of GitHub releases per watch |
 | `repository/worktree.py`, `remote.py`, `git_info.py`, `paths.py`, `compile_db.py` | isolated copies, URL repository cache, read-only git queries, path safety, compile-database helpers |
 | `package_managers/base.py`, `conan.py`, `conan_setup.py`, `vcpkg.py`, `detector.py` | adapter interface and minimal env, Conan 2, offline Conan home, vcpkg manifest mode, adapter detection |
@@ -429,8 +436,9 @@ filesystem. The first real PR did.
 | `research/breaking_change_analyzer.py`, `changelog_parser.py`, `release_fetcher.py`, `github_client.py` | R2 rules + R3 orchestration, changelog sections by version range, bounded release retrieval, GitHub REST |
 | `code_intelligence/ripgrep_indexer.py`, `symbol_extractor.py`, `clang_analyzer.py`, `impact_analyzer.py` | I1 search, symbol→change mapping, I2 AST resolution, the I1–I4 cascade |
 | `clang_support.py` | libclang loading (`$LIBCLANG_PATH`, LLVM 18 locations) and unwrapped C functions |
-| `migration/planner.py`, `patch_generator.py`, `patch_validator.py` | evidence-gated plan, deterministic diffs, scoped application |
-| `verification/command_runner.py`, `pipeline.py`, `diagnostics.py`, `error_classifier.py`, `repair_engine.py` | bounded subprocesses, install/configure/build/test (+ configuration matrix), diagnostics, classification, repair |
+| `migration/planner.py`, `patch_generator.py`, `patch_validator.py` | recipe-driven plan, recipe-generated diffs with postcondition checks, scoped application |
+| `migration/recipes/` | `MigrationRecipe` contract and registry; `symbol-rename`, `header-relocation`; Clang AST extension point |
+| `verification/command_runner.py` (dispatches to the execution backend), `pipeline.py`, `diagnostics.py`, `error_classifier.py`, `repair_engine.py` | bounded subprocesses, install/configure/build/test (+ configuration matrix), diagnostics, classification, repair |
 | `reporting/evidence_collector.py`, `report_generator.py`, `pull_request.py` | per-repository evidence and report, PR body / publishing |
 | `llm/base.py`, `runtime.py`, `provider.py`, `gemini.py` | LLM interface + fixture client, per-job binding, Anthropic and Gemini providers |
 
@@ -449,11 +457,18 @@ depbot run           --fleet F --event E [--approve-major] [--force] [--create-p
 depbot upgrade       --repo PATH|URL --dependency N --to V [--changelog C] [--upstream-repo O/R]
                      [--base B] [--conan-home H] [--approve-major] [--create-pr] [--llm …]
 depbot monitor       --fleet F [--once | --interval SECONDS] [--dry-run] [--approve-major] [--create-pr] [--llm …]
+depbot runs          list | show RUN [--job REPO] | compare A B | cancel RUN | resume RUN   --fleet F [--json]
+depbot bench         list | run [--split dev|held_out|all] [--case ID] [--out DIR] | hash PATH | report RESULTS
 depbot demo setup    --fleet F --recipe DIR [--recipe DIR …]
 ```
 
-`--state-dir` defaults to `<fleet dir>/.depbot` and holds the index, event log, URL-repository cache and the
-isolated Conan home. `--llm` can also come from `$DEPBOT_LLM`, and the model from `$DEPBOT_LLM_MODEL`.
+`run`, `upgrade`, `monitor`, `runs resume` and `bench run` also take `--workers N` (not `upgrade`/`bench`) and
+`--exec-backend local|docker|podman --exec-image IMAGE [--exec-network none|bridge] [--exec-network-install]
+[--exec-cpus N] [--exec-memory-mb N] [--exec-pids N] [--exec-mount-ro PATH] [--exec-mount-rw PATH]`.
+See [docs/INFRASTRUCTURE.md](docs/INFRASTRUCTURE.md).
+
+`--state-dir` defaults to `<fleet dir>/.depbot` and holds the index, the SQLite run database (`depbot.db`),
+the URL-repository cache and the isolated Conan home. `--llm` can also come from `$DEPBOT_LLM`, and the model from `$DEPBOT_LLM_MODEL`.
 
 ---
 
@@ -520,7 +535,7 @@ pytest tests/e2e                         # real-tool end-to-end only
 pytest -m "not real_tooling" tests/unit  # pure unit tests
 ```
 
-384 tests in 41 files:
+0 tests in 50 files:
 
 | Suite | Tests | What it proves |
 |---|---:|---|
@@ -675,9 +690,10 @@ answer is still outstanding** (see §10).
 - **The live LLM is not yet validated.** The Gemini integration reached the API, but every attempt hit a
   provider error (§9.4). The deterministic path is fully validated. LLM behaviour is validated only with
   recorded responses.
-- **Only renames are migrated automatically.** One old symbol → one documented replacement, on definite
-  lines. Signature changes, behaviour changes, const-correctness requirements (e.g. fmt 11's
-  `formatter::format` must be `const`), header moves (Catch2 v3) and CMake target renames end as an
+- **Only renames and documented header moves are migrated automatically.** One old symbol or header →
+  one documented replacement, on definite lines. Signature changes, behaviour changes, const-correctness
+  requirements (e.g. fmt 11's `formatter::format` must be `const`), header splits where one header becomes
+  several (Catch2 v3) and CMake target renames end as an
   honest FAILED_BUILD/FAILED_TESTS (or BLOCKED by the confidence gate), never as a guessed patch.
 - **Macros and generated code.** A symbol assembled by token pasting (`toydep::old_##name`) can't be found
   or fixed (`repo_e`). Code in inactive preprocessor branches is only `possible` unless another
@@ -687,10 +703,15 @@ answer is still outstanding** (see §10).
   only; baseline-only pins are refused rather than moving the baseline. CPM/FetchContent and git
   submodules are not handled.
 - **One dependency per event.** Coupled upgrades (e.g. spdlog with its bundled fmt) are out of scope.
-- **Jobs run sequentially.** There is no worker pool. The engine is concurrency-safe (per-job LLM context),
-  but parallel jobs aren't implemented.
-- **Persistence is JSON files** (index, event log), not a database. That's sufficient for a fleet of this
-  size.
+- **Concurrency is one process.** `--workers N` runs jobs on a bounded thread pool; there are no
+  distributed workers. Dependency installs are serialised because the package cache is shared.
+- **Container isolation has not been exercised against a real runtime here.** The command DepBot builds,
+  its mount policy and its kill/remove behaviour are tested with a recording stand-in for the docker CLI;
+  the adversarial tests that run inside a real container (`pytest -m container`) need Docker or Podman
+  and an image, and were skipped on the development machine. `git`, ripgrep and libclang still run on the host.
+- **The dependency index is still a JSON file.** Events, runs, jobs and telemetry are in SQLite.
+- **Benchmark cases are local fixtures.** They run real Conan/CMake/CTest builds, but none is a public
+  upstream project at a pinned commit yet; the registry supports that (`repository.url` + `commit`).
 - **The AST layers depend on libclang 18 and a compile database.** Without them, impact is text-based and
   only clear calls are definite. A libclang without builtin headers weakens I2 (§9.2).
 - **Not run for real:** a public open-source repository fetched from Conan Center (the trials used local
@@ -704,15 +725,20 @@ answer is still outstanding** (see §10).
 
 ```text
 src/depbot/             the package (see Code map)
-tests/unit|integration|e2e   384 tests; tests/fixtures/toydep: toy library v1/v2 + repo_a…repo_e
+tests/unit|integration|e2e   tests/fixtures/toydep: toy library v1/v2 + repo_a…repo_e
 examples/
   demo-fleet.yaml, repair-demo-fleet.yaml, github-pr-demo-fleet.yaml, events/
   real-fmt/             Demo B: fmt 6.2.1 → 7.0.0 (app, recipe template, prepare.sh, runbook)
   real-vcpkg/           vcpkg manifest-mode demo with an in-repo filesystem registry
   shapes/               11-shape repository corpus + expected outcomes
+benchmarks/
+  registry.yaml         versioned benchmark cases with ground truth (dev + held-out)
+  fixtures/             geomdep (moved header) and scaledep (behaviour change) packages and apps
+  results/              report of a real benchmark run
 scripts/llm_live_check.py   live R3/I4 check against a real provider
 docs/
   CONTRACTS.md          stage contracts, models and the contract change log
+  INFRASTRUCTURE.md     execution backends, durable state and recovery, worker pool, recipes, benchmarks, telemetry
   plan.md               original product plan, priorities (P0/P1/P2) and team split
   instructions.md       engineering, safety and collaboration rules used during development
   spikes/clang_usr_resolution/   the libclang spike that shaped impact layer I2

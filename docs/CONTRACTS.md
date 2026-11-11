@@ -334,6 +334,18 @@ target, not just the target version's section.
 
 ## 7. Change log
 
+- 0.9.0 — infrastructure (see `docs/INFRASTRUCTURE.md`). Stage signatures and models are unchanged.
+  Additive: `interfaces.JobObserver` and `interfaces.SideEffectLedger`;
+  `RepositoryJobRunner(..., observer=, execution=, ledger=, resume_state=, attempt=, fleet_run_id=)` and
+  `run_repository_job(..., **options)`; `run_fleet(..., workers=, execution=, cancel=, lease_seconds=, store=)`,
+  `resume_fleet`; `publish_pull_request(..., ledger=)` (now looks for an existing open PR before creating one);
+  `depbot.execution` (backends; `run_command` dispatches to the bound one), `depbot.persistence`,
+  `depbot.fleet.pool`, `depbot.telemetry`, `depbot.benchmark`, `depbot.migration.recipes`.
+  Behaviour: the engine now runs the plan confidence gate as its own `policy_gate` stage and records
+  `repo_facts["checkpoint_diff_sha256"]` at `PATCHED`; `EventLog` is backed by `<state_dir>/depbot.db`
+  (a legacy `events.json` is imported); a cancelled job ends `BLOCKED` with reason `cancelled: …`;
+  `PlannedChange.reason` names the recipe; R2 recognises moved headers (`ChangeType.RENAMED` with header
+  paths as symbols); `patch_generator._mapping` is now `migration.recipes.unique_mapping`.
 - 0.8.2 — cleanup for submission. Removed: `MigrationPattern`, `MigrationVerification` and
   `depbot.knowledge` (a verified-pattern store the pipeline never called), and the never-read fields
   `UpgradePolicy.require_release_build` (superseded by `build_configurations`) and

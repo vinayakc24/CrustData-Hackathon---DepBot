@@ -19,6 +19,8 @@ import sys
 import threading
 from pathlib import Path
 
+from depbot.benchmark.models import BenchmarkError, BenchmarkResults, load_registry
+from depbot.benchmark.runner import BenchmarkRunner, default_out_dir, tree_sha256, write_results
 from depbot.fleet.dependency_index import DependencyIndex, scan_repository
 from depbot.fleet.events import EventLog
 from depbot.fleet.monitor import PollReport, poll_fleet_once, run_monitor
@@ -476,6 +478,67 @@ def cmd_upgrade(args: argparse.Namespace) -> int:
     return 0 if outcome.status in _GOOD else 1
 
 
+def cmd_bench_list(args: argparse.Namespace) -> int:
+    registry = load_registry(Path(args.registry))
+    if args.json:
+        print(registry.model_dump_json(indent=2))
+        return 0
+    print(f"{registry.suite} {registry.suite_version}: {len(registry.cases)} case(s)")
+    for case in registry.cases:
+        print(f"  {case.id:<36} {case.split:<9} {case.dependency} {case.baseline_version}->{case.target_version}"
+              f"  expect={case.expected.outcome.value}  [{', '.join(case.tags)}]")
+    return 0
+
+
+def cmd_bench_hash(args: argparse.Namespace) -> int:
+    for raw in args.path:
+        print(f"{tree_sha256(Path(raw).resolve())}  {raw}")
+    return 0
+
+
+def cmd_bench_run(args: argparse.Namespace) -> int:
+    """Run benchmark cases through the real engine. Exit 1 on any false-verified outcome or harness error."""
+    registry_path = Path(args.registry)
+    registry = load_registry(registry_path)
+    unknown = sorted(set(args.case) - {c.id for c in registry.cases})
+    if unknown:
+        raise BenchmarkError(f"unknown case id: {', '.join(unknown)}")
+    splits = ["dev", "held_out"] if args.split == "all" or args.case else [args.split]
+    backend = build_backend(_execution_config(args))
+    if backend.problems():
+        raise FleetRunError(f"execution backend '{backend.name}' is unusable: " + "; ".join(backend.problems()))
+    out_dir = Path(args.out).resolve() if args.out else default_out_dir(Path(args.artifacts).resolve())
+    llm_mode = args.llm or os.environ.get("DEPBOT_LLM") or "none"
+    runner = BenchmarkRunner(registry, registry_path, out_dir, stages_factory=load_default_stages,
+                             llm_factory=_llm_factory(args), llm_label=llm_mode, backend=backend)
+
+    def progress(result) -> None:
+        if not args.json:
+            verdict = result.status.upper() if result.status != "completed" else (
+                "ok" if result.outcome_match and result.patch_correct is not False else "MISS")
+            print(f"  {verdict:<8} {result.case_id:<36} expected={result.expected_outcome:<10} "
+                  f"actual={result.actual_outcome or '-':<10} {result.reason or ''}", flush=True)
+
+    results = runner.run(splits=splits, case_ids=args.case or None, on_case=progress)
+    if args.json:
+        print(results.model_dump_json(indent=2))
+    else:
+        overall = results.aggregate["overall"]
+        print(f"completed={overall.completed} not_run={overall.not_run} errors={overall.errors} "
+              f"outcome_accuracy={overall.outcome_accuracy} false_verified={overall.false_verified}")
+        print(f"results: {out_dir / 'results.json'}\nreport:  {out_dir / 'report.md'}")
+    overall = results.aggregate["overall"]
+    return 1 if overall.false_verified or overall.errors else 0
+
+
+def cmd_bench_report(args: argparse.Namespace) -> int:
+    path = Path(args.results)
+    results = BenchmarkResults.model_validate_json(path.read_text(encoding="utf-8"))
+    _, report = write_results(results, path.parent)
+    print(report.read_text(encoding="utf-8") if args.stdout else f"report: {report}")
+    return 0
+
+
 def _print_poll_report(report: PollReport, as_json: bool) -> None:
     if as_json:
         print(report.model_dump_json(indent=2))
@@ -611,6 +674,32 @@ def build_parser() -> argparse.ArgumentParser:
     _add_exec_args(mon)
     mon.set_defaults(func=cmd_monitor)
 
+    bench = sub.add_parser("bench", help="reproducible migration benchmarks").add_subparsers(
+        dest="bench_command", required=True
+    )
+    blist = bench.add_parser("list", help="cases in a benchmark registry")
+    blist.add_argument("--registry", default="benchmarks/registry.yaml")
+    blist.add_argument("--json", action="store_true")
+    blist.set_defaults(func=cmd_bench_list)
+    bhash = bench.add_parser("hash", help="content hash that pins an in-tree fixture repository")
+    bhash.add_argument("path", nargs="+")
+    bhash.set_defaults(func=cmd_bench_hash)
+    brun = bench.add_parser("run", help="run cases and write results.json + report.md")
+    brun.add_argument("--registry", default="benchmarks/registry.yaml")
+    brun.add_argument("--split", choices=("dev", "held_out", "all"), default="dev",
+                      help="which split to run (default: dev; held-out cases run only when asked)")
+    brun.add_argument("--case", action="append", default=[], metavar="ID", help="run only this case (repeatable)")
+    brun.add_argument("--out", help="output directory (default: <artifacts>/bench-<timestamp>)")
+    brun.add_argument("--artifacts", default="artifacts")
+    brun.add_argument("--json", action="store_true")
+    _add_llm_args(brun)
+    _add_exec_args(brun, workers=False)
+    brun.set_defaults(func=cmd_bench_run)
+    breport = bench.add_parser("report", help="re-render report.md from a results.json")
+    breport.add_argument("results")
+    breport.add_argument("--stdout", action="store_true")
+    breport.set_defaults(func=cmd_bench_report)
+
     demo = sub.add_parser("demo", help="demo helpers").add_subparsers(dest="demo_command", required=True)
     setup = demo.add_parser("setup", help="build local recipes into the fleet's isolated Conan home")
     setup.add_argument("--fleet", required=True, help="fleet YAML config")
@@ -629,7 +718,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     try:
         return args.func(args)
-    except (RegistryError, LLMError, FleetRunError, StoreError, UnknownRun, ExecutionConfigError,
+    except (RegistryError, LLMError, FleetRunError, StoreError, UnknownRun, ExecutionConfigError, BenchmarkError,
             ValidationError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

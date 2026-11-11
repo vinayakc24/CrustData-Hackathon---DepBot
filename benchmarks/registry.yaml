@@ -1,0 +1,249 @@
+# DepBot migration benchmark registry.
+#
+# Each case pins a repository (tree_sha256 for in-tree fixtures, commit for Git URLs),
+# a dependency upgrade and the ground truth of a CORRECT migration. Ground truth is
+# written by hand from the fixture sources; it is never copied from DepBot output.
+# Bump suite_version whenever a case or its ground truth changes.
+#
+#   depbot bench run --registry benchmarks/registry.yaml            # dev split
+#   depbot bench run --registry benchmarks/registry.yaml --split all
+#   depbot bench hash PATH                                           # pin a fixture
+schema_version: 1
+suite: depbot-cpp-migrations
+suite_version: "2026.11.1"
+
+x-toydep: &toydep
+  dependency: toydep
+  baseline_version: 1.0.0
+  target_version: 2.0.0
+  upstream_repo: local/toydep
+  changelog: ../tests/fixtures/toydep/release-notes-2.0.0.md
+  setup:
+    conan_recipes: [../tests/fixtures/toydep/v1, ../tests/fixtures/toydep/v2, ../examples/shapes/recipes/otherdep]
+
+x-old-sum: &old_sum
+  - {affected_symbols: [old_sum], replacement_symbols: [sum], change_type: removed}
+
+x-geomdep: &geomdep
+  dependency: geomdep
+  baseline_version: 1.0.0
+  target_version: 2.0.0
+  upstream_repo: local/geomdep
+  changelog: fixtures/geomdep/release-notes-2.0.0.md
+  setup:
+    conan_recipes: [fixtures/geomdep/v1, fixtures/geomdep/v2]
+
+x-header-move: &header_move
+  - {affected_symbols: [geomdep/legacy.hpp], replacement_symbols: [geomdep/core.hpp], change_type: renamed}
+
+cases:
+  # ------------------------------------------------------------ toydep: removed function
+  - id: toydep-direct-call
+    description: Removed function called directly in main.cpp.
+    tags: [rename, conan]
+    repository: {path: ../tests/fixtures/toydep/repositories/repo_a, tree_sha256: e5a3fe7862b6071b84d6757c14b3e39ed1ac63e6e4920e74a7d4a0dedfb413b3}
+    <<: *toydep
+    expected:
+      breaking_changes: *old_sum
+      affected_usages: [{file: src/main.cpp, line: 4, symbol: old_sum}]
+      outcome: verified
+      patched_lines:
+        src/main.cpp: [{line: 4, text: "    return toydep::sum(2, 3) == 5 ? 0 : 1;"}]
+
+  - id: toydep-call-in-initializer
+    description: Removed function called in a variable initializer.
+    tags: [rename, conan]
+    repository: {path: ../tests/fixtures/toydep/repositories/repo_b, tree_sha256: 4faab8ee2124f2b64d96f97e183457e6cb493b17ebc1b42891d95b9014bb6594}
+    <<: *toydep
+    expected:
+      breaking_changes: *old_sum
+      affected_usages: [{file: src/main.cpp, line: 4, symbol: old_sum}]
+      outcome: verified
+      patched_lines:
+        src/main.cpp: [{line: 4, text: "    const int total = toydep::sum(-4, 9);"}]
+
+  - id: toydep-already-current
+    description: Repository already on the target version; nothing may be changed.
+    tags: [selection]
+    repository: {path: ../tests/fixtures/toydep/repositories/repo_c, tree_sha256: 83d44a1309e9fbc0d9377b118058475831199e6378bf95df729c7403a39da877}
+    <<: *toydep
+    expected: {outcome: skipped}
+
+  - id: toydep-usage-in-inc-file
+    description: A second usage hides in a .inc file the text index does not search.
+    tags: [rename, compiler-probe]
+    repository: {path: ../tests/fixtures/toydep/repositories/repo_d, tree_sha256: d8b30052dc941b25fed2801daf76042c197f5e7a3566a33a057eb1d33e6301d4}
+    <<: *toydep
+    expected:
+      breaking_changes: *old_sum
+      affected_usages:
+        - {file: src/main.cpp, line: 6, symbol: old_sum}
+        - {file: src/calls.inc, line: 2, symbol: old_sum}
+      outcome: verified
+      patched_lines:
+        src/main.cpp: [{line: 6, text: "    return toydep::sum(2, 3) == 5 && via_inc() == 2 ? 0 : 1;"}]
+        src/calls.inc: [{line: 2, text: "inline int via_inc() { return toydep::sum(1, 1); }"}]
+
+  - id: shape-multi-requires
+    description: Several requirements and comments in the manifest; only toydep may change.
+    tags: [manifest]
+    repository: {path: ../examples/shapes/repos/s01_multi_requires, tree_sha256: bffdafa5db05cced398d1703337f350dc0d6b7fccc10dad8cf261e65a9ff292e}
+    <<: *toydep
+    expected:
+      breaking_changes: *old_sum
+      affected_usages: [{file: src/main.cpp, line: 5, symbol: old_sum}]
+      outcome: verified
+      patched_lines:
+        src/main.cpp: [{line: 5, text: "    return toydep::sum(otherdep::two(), 3) == 5 ? 0 : 1;"}]
+
+  - id: shape-version-range
+    description: Version range in the manifest cannot be rewritten safely; must refuse.
+    tags: [abstention, manifest]
+    repository: {path: ../examples/shapes/repos/s03_version_range, tree_sha256: 8c5f367717bb7d1a275b65b82fffcf45d82730a458f4204d559d280f9226b9e0}
+    <<: *toydep
+    expected: {outcome: blocked, breaking_changes: *old_sum}
+
+  - id: shape-conanfile-py
+    description: Executable conanfile.py recipe; must refuse rather than execute or edit it.
+    tags: [abstention, manifest]
+    repository: {path: ../examples/shapes/repos/s04_conanfile_py, tree_sha256: 845fe90f906060f2239b23ad3c0ff06ca9eecbd3dcd75e3b8dfbfff41ec7c1ec}
+    <<: *toydep
+    expected: {outcome: blocked, breaking_changes: *old_sum}
+
+  - id: shape-header-and-tests
+    description: Usages in a public header and in a test source.
+    tags: [rename, multi-file]
+    repository: {path: ../examples/shapes/repos/s05_header_and_tests, tree_sha256: ea92119317d3b1302717701f644c9120ac2e3c5825d17e8a43a967e982e026f1}
+    <<: *toydep
+    expected:
+      breaking_changes: *old_sum
+      affected_usages:
+        - {file: include/mylib/api.hpp, line: 5, symbol: old_sum}
+        - {file: tests/test_main.cpp, line: 4, symbol: old_sum}
+      outcome: verified
+      patched_lines:
+        include/mylib/api.hpp: [{line: 5, text: "inline int add(int a, int b) { return toydep::sum(a, b); }"}]
+        tests/test_main.cpp: [{line: 4, text: "    return mylib::add(2, 3) == 5 && toydep::sum(1, 1) == 2 ? 0 : 1;"}]
+
+  - id: shape-no-tests
+    description: Builds but has no tests while policy requires them; must not be verified.
+    tags: [abstention, policy]
+    repository: {path: ../examples/shapes/repos/s06_no_tests, tree_sha256: a0fa838077f1851b8377e9c0344775105949130b697d3c895809f4fe61b42995}
+    <<: *toydep
+    expected: {outcome: blocked, breaking_changes: *old_sum}
+
+  - id: shape-baseline-broken
+    description: The baseline does not build; the upgrade must not be attempted or blamed.
+    tags: [abstention, baseline]
+    repository: {path: ../examples/shapes/repos/s07_baseline_broken, tree_sha256: de90830a88cae3deb45bf13337363d762d29ee5982f020679dc68ca46a18cbc8}
+    <<: *toydep
+    expected: {outcome: blocked, breaking_changes: *old_sum}
+
+  - id: shape-crlf
+    description: CRLF sources; the edit must keep line endings.
+    tags: [rename, encoding]
+    repository: {path: ../examples/shapes/repos/s08_crlf, tree_sha256: 5d2a4b7d0460c20446ff53f16f66248a55bc08666b19cd0e39e62b9fe203a2fd}
+    <<: *toydep
+    expected:
+      breaking_changes: *old_sum
+      affected_usages: [{file: src/main.cpp, line: 4, symbol: old_sum}]
+      outcome: verified
+      patched_lines:
+        src/main.cpp: [{line: 4, text: "    return toydep::sum(2, 3) == 5 ? 0 : 1;"}]
+
+  - id: shape-no-code-usage
+    description: Includes the dependency but uses none of the removed API.
+    tags: [abstention, unaffected]
+    repository: {path: ../examples/shapes/repos/s09_no_code_usage, tree_sha256: 91fc96faa92c6b6f603b479ac586127ec6bab9eded28976e507f99b72a57e303}
+    <<: *toydep
+    expected: {outcome: unaffected, breaking_changes: *old_sum}
+
+  - id: shape-comments-and-strings
+    description: The removed name appears only in a comment and a string literal.
+    tags: [abstention, unaffected, false-positive-trap]
+    repository: {path: ../examples/shapes/repos/s10_comments_and_strings, tree_sha256: 50f90f4fd34362662cae2d5ed74debdc904c7fee60cb815274dd262787285af5}
+    <<: *toydep
+    expected: {outcome: unaffected, breaking_changes: *old_sum}
+
+  # ------------------------------------------------------- geomdep: relocated header
+  - id: header-relocation
+    description: A public header moved; the old path also appears in a comment that must stay.
+    tags: [header-relocation, compiler-probe]
+    repository: {path: fixtures/geomdep/repos/hdr_move, tree_sha256: 4155788d14fedfa91727bbdf6a7a4b741f1861f750fc1091cef59024610fe4e6}
+    <<: *geomdep
+    expected:
+      breaking_changes: *header_move
+      affected_usages: [{file: src/main.cpp, line: 2, symbol: geomdep/legacy.hpp}]
+      outcome: verified
+      patched_lines:
+        src/main.cpp:
+          - {line: 1, text: "// Area helpers come from geomdep/legacy.hpp (see the geomdep 1.x documentation)."}
+          - {line: 2, text: "#include <geomdep/core.hpp>"}
+
+  # ------------------------------------------------------------------ held-out split
+  - id: toydep-token-pasting
+    split: held_out
+    description: One call is built by macro token pasting; the old name never appears literally there.
+    tags: [rename, macro]
+    repository: {path: ../tests/fixtures/toydep/repositories/repo_e, tree_sha256: 1810cf9a47a50c055692bafc0dba3a392b154ff05d910108e27c62c84fc3a988}
+    <<: *toydep
+    expected:
+      breaking_changes: *old_sum
+      affected_usages:
+        - {file: src/main.cpp, line: 7, symbol: old_sum}
+        - {file: src/main.cpp, line: 4, symbol: old_sum}
+      outcome: verified
+      absent_text:
+        src/main.cpp: ["old_sum", "old_##"]
+
+  - id: shape-using-declaration
+    split: held_out
+    description: The removed function is imported with a using-declaration and called unqualified.
+    tags: [rename, using-declaration]
+    repository: {path: ../examples/shapes/repos/s11_using_declaration, tree_sha256: 70a75c4c90fe8f12ee05bd1c33c3f45858ddae6af9755803d32dada1eaf629c7}
+    <<: *toydep
+    expected:
+      breaking_changes: *old_sum
+      affected_usages:
+        - {file: src/main.cpp, line: 3, symbol: old_sum}
+        - {file: src/main.cpp, line: 6, symbol: old_sum}
+      outcome: verified
+      patched_lines:
+        src/main.cpp:
+          - {line: 3, text: "using toydep::sum;"}
+          - {line: 6, text: "    return sum(2, 3) == 5 ? 0 : 1;"}
+
+  - id: header-relocation-already-included
+    split: held_out
+    description: The new header is already included; the stale include must be removed, not duplicated.
+    tags: [header-relocation]
+    repository: {path: fixtures/geomdep/repos/hdr_move_already_included, tree_sha256: c74f5b1c54e98353c253924e50eb2f5b084c858e3cbe0289f4b4ce950e47a220}
+    <<: *geomdep
+    expected:
+      breaking_changes: *header_move
+      affected_usages: [{file: src/main.cpp, line: 2, symbol: geomdep/legacy.hpp}]
+      outcome: verified
+      patched_lines:
+        src/main.cpp: [{line: 1, text: "#include <geomdep/core.hpp>"}]
+      absent_text:
+        src/main.cpp: ["geomdep/legacy.hpp"]
+
+  - id: behavior-change-no-replacement
+    split: held_out
+    description: >-
+      Same API, different result, no documented replacement. No automatic edit is
+      correct; the upgrade must end unverified (tests catch the regression).
+    tags: [abstention, behavior]
+    repository: {path: fixtures/scaledep/repos/behavior_change, tree_sha256: 74680c3b81cda0ce07ee35969f9f35404e89de1756f356f0e9907c58e41c1be3}
+    dependency: scaledep
+    baseline_version: 1.0.0
+    target_version: 2.0.0
+    upstream_repo: local/scaledep
+    changelog: fixtures/scaledep/release-notes-2.0.0.md
+    setup:
+      conan_recipes: [fixtures/scaledep/v1, fixtures/scaledep/v2]
+    expected:
+      breaking_changes: [{affected_symbols: [scale], change_type: behavior}]
+      affected_usages: [{file: src/main.cpp, line: 4, symbol: scale}]
+      outcome: failed
+      also_acceptable: [blocked]
